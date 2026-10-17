@@ -1,8 +1,46 @@
-# Validasi tahap UI
+# Validasi
+
+## CUDA (18 Oktober 2026)
+
+CUDA 12.9.1 gagal: nvcc menolak MSVC 14.51 (VS 2026), dan dengan `-allow-unsupported-compiler` `cudafe++` crash (ACCESS_VIOLATION). Diganti CUDA 13.2.2, versi pertama yang resmi mendukung VS 2026 menurut [panduan instalasi CUDA Windows](https://docs.nvidia.com/cuda/cuda-installation-guide-microsoft-windows/index.html); berjalan pada driver 582.05 (CUDA 13.0) melalui minor version compatibility. Komponen redistributable diunduh dengan SHA-256 dari manifest NVIDIA, dibangun dengan generator Ninja dan `CMAKE_CUDA_ARCHITECTURES=120` (CMake memakai `120a`, SASS native, tanpa JIT PTX).
+
+- `./scripts/build-cuda.ps1 test --locked --release '--' --ignored fixture --nocapture`: backend `GPU CUDA0`, log `Device 0: NVIDIA GeForce RTX 5060 Laptop GPU, compute capability 12.0`; load 1,0-3,3 dtk; ASR 0,33-0,41 dtk per klip FLEURS (CPU 8,9-12,0 dtk); teks identik dengan CPU/CLI. Tidak ada lonjakan pemanasan 25 dtk seperti runtime b5454. Utilisasi GPU puncak 97%, memori device 2196 MiB (seluruh device, bukan per proses).
+- `./scripts/build-cuda.ps1 clippy --locked --all-targets '--' -D warnings`: lulus. Linker memberi peringatan LNK4098 (LIBCMT dari cudart statis); tidak ada kegagalan teramati.
+- Paket `dist/fi-whisper` diluncurkan dari shell tanpa CUDA di PATH: proses memuat `cublas64_13.dll`/`cublasLt64_13.dll` dari folder paket dan `nvcuda.dll` dari driver, tercantum di nvidia-smi, responsif.
+- MCP egui (build CUDA + inspection): status Siap, `Backend: GPU CUDA0`, diagnostik backend tampil. Rekaman tombol 1,5 dtk di ruangan sunyi lolos VAD dan Whisper menghasilkan halusinasi "Terima kasih." (ASR 0,51 dtk). Ditambahkan filter segmen dengan `no_speech_probability >= 0,6`; fixture tetap identik dan noise sintetis menghasilkan Tidak ada ucapan, tetapi kasus mikrofon nyata tersebut belum diuji ulang.
+
+## Integrasi backend (18 Oktober 2026)
+
+Build CPU (tanpa fitur `cuda`), whisper-rs 0.16.0 / whisper.cpp 1.8.3, MSVC 14.51, CMake 4.2.0, LLVM libclang. Backend aktual yang dilaporkan app berasal dari log inisialisasi whisper.cpp, bukan flag konfigurasi.
+
+Checks: `cargo fmt -- --check`, `cargo clippy --locked --all-targets -- -D warnings` (dengan dan tanpa `inspection`), `cargo test --locked` (10 lulus, 1 ignored), `cargo build --locked --release` lulus. Unit test mencakup konversi sampel signed/unsigned, downmix, overflow ring buffer, durasi/tail resampling, rentang VAD dengan jeda tengah, penggabungan segmen, ringkasan backend, config atomik/rusak, keputusan insert saat target berubah, dan surrogate pair SendInput.
+
+Uji model eksplisit `cargo test --release -- --ignored fixture --nocapture` (worker persisten, CPU, 8 thread): load 0,9 dtk; silence 3 dtk menghasilkan Tidak ada ucapan; tiga fixture FLEURS menghasilkan teks identik dengan uji CLI, ASR 8,9-12,0 dtk per klip (VAD 11-51 ms). Dua temuan diperbaiki:
+
+- cmake-rs tidak memberi `/O2` pada konfigurasi Release MSVC; whisper.cpp terkompilasi tanpa optimasi dan ASR ~90 dtk per klip. `.cargo/config.toml` menetapkan `CMAKE_C/CXX_FLAGS_RELEASE`.
+- `set_abort_callback_safe` di whisper-rs 0.16 membaca user data dengan tipe salah sehingga encode gagal acak (error -6). Diganti callback raw dengan atomic sesi.
+
+MCP egui pada build release `--features inspection`, mikrofon default Realtek Microphone Array:
+
+| Skenario | Hasil |
+| --- | --- |
+| Start | Model dari `models/` dimuat otomatis, status Siap, backend CPU, shortcut Ctrl+Alt+Space terdaftar |
+| Mulai/Selesai via tombol | Mikrofon aktif, timer berjalan; 16,1 dtk audio 16 kHz diterima; VAD tidak menemukan ucapan di ruangan sunyi; tidak ada hasil/insert |
+| Batalkan saat merekam | Kembali Siap, audio dibuang |
+| Shortcut tidak valid | Error tampil, shortcut lama tetap aktif |
+| Tutup jendela pertama kali | Dialog penjelasan tray tampil; Sembunyikan menyembunyikan jendela |
+| Hotkey saat tersembunyi | Dua penekanan (SendInput sintetis) merekam 2,3 dtk dan memproses tanpa jendela terlihat |
+| Instance kedua | Menampilkan pesan dan tidak memulai app kedua |
+
+Belum diverifikasi: dikte ucapan nyata dari mikrofon dan penyisipan teks ke aplikasi lain (butuh suara pengguna), meter level (selalu kosong di ruangan sunyi; belum diuji dengan suara), menu tray Buka/Batalkan/Keluar via klik nyata (jalur Buka diuji memanggil ShowWindow yang sama), cancel saat inferensi berjalan, sleep/resume, mikrofon dilepas, aplikasi elevated, matriks aplikasi, dan paket portable di mesin lain.
+
+## Tahap UI
 
 Tanggal: 18 Oktober 2026, Windows x64. Cakupan: UI Rust egui, tanpa backend dikte.
 
 Uji model terpisah dilakukan setelah tahap UI: lihat [MODEL-TEST.md](MODEL-TEST.md). Pernyataan belum diuji di bawah merupakan batas sesi UI, bukan pembatalan hasil uji CLI tersebut.
+
+Revisi teks UI berikutnya pada 18 Oktober 2026 menghapus tagline, meringkas petunjuk/status/pesan model, dan mengganti teks contoh dengan kalimat rapat. Dua test Rust, fmt, build release, dan pemeriksaan MCP egui lulus. Screenshot Dikte dan Pengaturan diamati; alur Mulai/Selesai, teks hasil baru, Konfirmasi pilihan, dan Tutup pesan berfungsi. Screenshot revisi disimpan lokal sebagai `docs/ui-copy-dictation.png` dan `docs/ui-copy-settings.png`.
 
 ## Build dan pemeriksaan otomatis
 

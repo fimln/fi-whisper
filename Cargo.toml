@@ -7,10 +7,21 @@ license = "MIT"
 
 [features]
 inspection = ["eframe/inspection"]
+cuda = ["whisper-rs/cuda"]
 
 [dependencies]
 eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow"] }
 rfd = "=0.17.2"
+whisper-rs = { version = "=0.16.0", features = ["raw-api"] }
+raw-window-handle = "=0.6.2"
+cpal = "=0.18.2"
+rubato = "=5.0.1"
+rtrb = "=0.4.0"
+global-hotkey = "=0.9.0"
+tray-icon = "=0.26.1"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 [profile.release]
 opt-level = "s"
