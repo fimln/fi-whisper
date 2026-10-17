@@ -30,4 +30,21 @@ $env:CMAKE_CUDA_ARCHITECTURES = '120'
 Set-Location $root
 # --features diletakkan sebelum argumen lain agar tidak jatuh setelah `--`.
 & cargo $CargoArgs[0] --features cuda @($CargoArgs | Select-Object -Skip 1)
-exit $LASTEXITCODE
+$code = $LASTEXITCODE
+if ($code -eq 0) {
+    # Exe CUDA mengimpor cuBLAS secara dinamis; salin DLL ke samping exe agar bisa dijalankan langsung
+    # dari target\<profil> tanpa CUDA di PATH. Hanya disalin jika belum ada atau berbeda ukuran/waktu.
+    $buildProfile = if ($CargoArgs -contains '--release' -or $CargoArgs -contains '-r') { 'release' } else { 'debug' }
+    $outDir = Join-Path $root "target\$buildProfile"
+    if (Test-Path -LiteralPath $outDir) {
+        foreach ($dll in 'cublas64_13.dll', 'cublasLt64_13.dll') {
+            $src = Get-Item -LiteralPath (Join-Path $cuda "bin\x64\$dll")
+            $dst = Join-Path $outDir $dll
+            $old = Get-Item -LiteralPath $dst -ErrorAction SilentlyContinue
+            if (!$old -or $old.Length -ne $src.Length -or $old.LastWriteTimeUtc -ne $src.LastWriteTimeUtc) {
+                Copy-Item -LiteralPath $src.FullName -Destination $dst -Force
+            }
+        }
+    }
+}
+exit $code

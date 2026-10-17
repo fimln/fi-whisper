@@ -125,6 +125,6 @@ pub fn primary(ui: &mut Ui, enabled: bool, text: &str) -> egui::Response {
         enabled,
         egui::Button::new(RichText::new(text).color(BG))
             .fill(ACCENT)
-            .min_size(vec2(150.0, 42.0)),
+            .min_size(vec2(120.0, 42.0)),
     )
 }

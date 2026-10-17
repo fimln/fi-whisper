@@ -19,7 +19,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, IsIconic, IsWindow,
-    MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_RESTORE, SW_SHOW, SetForegroundWindow, ShowWindow,
+    MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow,
+    ShowWindow,
 };
 
 const CF_UNICODETEXT: u32 = 13;
@@ -235,6 +236,15 @@ pub fn show_window(hwnd: isize) {
             },
         );
         SetForegroundWindow(hwnd);
+    }
+}
+
+/// Sembunyikan langsung lewat Win32. `ViewportCommand::Visible(false)` tidak dipakai karena winit
+/// menyimpan status visible sendiri: setelah jendela ditampilkan lagi oleh `show_window`, perintah
+/// hide berikutnya dianggap no-op dan tombol close tampak tidak bekerja.
+pub fn hide_window(hwnd: isize) {
+    unsafe {
+        ShowWindow(hwnd as HWND, SW_HIDE);
     }
 }
 

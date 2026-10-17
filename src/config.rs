@@ -49,7 +49,8 @@ pub struct Config {
     pub microphone: Option<String>,
     pub language: Language,
     pub shortcut: String,
-    pub close_hint_shown: bool,
+    /// `true`: tombol close menyembunyikan jendela ke tray. `false`: keluar dari aplikasi.
+    pub close_to_tray: bool,
 }
 
 impl Default for Config {
@@ -60,7 +61,7 @@ impl Default for Config {
             microphone: None,
             language: Language::Indonesian,
             shortcut: "Ctrl+Alt+Space".into(),
-            close_hint_shown: false,
+            close_to_tray: true,
         }
     }
 }
@@ -143,5 +144,9 @@ mod tests {
         let config: Config = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
         assert_eq!(config.language, Language::English);
         assert_eq!(config.shortcut, "Ctrl+Alt+Space");
+        assert!(config.close_to_tray);
+        // Field lama dari versi sebelumnya diabaikan.
+        let config: Config = serde_json::from_str(r#"{"close_hint_shown":true}"#).unwrap();
+        assert!(config.close_to_tray);
     }
 }

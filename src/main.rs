@@ -26,7 +26,6 @@ struct Window {
 struct App {
     core: Handle,
     window: Arc<Window>,
-    settings: bool,
     config: Config,
     config_path: Option<PathBuf>,
     /// Error config rusak; selama ada, config tidak ditulis agar file lama tidak tertimpa.
@@ -41,8 +40,11 @@ struct App {
     hotkeys: Option<windows::Hotkeys>,
     tray: Option<windows::Tray>,
     tray_error: String,
-    close_prompt: bool,
     level: f32,
+    /// Tinggi alami isi kartu per baris/kolom dari frame sebelumnya, agar kartu sebaris sama tinggi.
+    rows: [[f32; 2]; 2],
+    /// Tinggi kosong di bawah kartu (frame sebelumnya) yang dibagikan ke baris.
+    extra: f32,
 }
 
 impl App {
@@ -97,7 +99,6 @@ impl App {
         let mut app = Self {
             core,
             window,
-            settings: false,
             asr: config
                 .asr_model
                 .clone()
@@ -117,8 +118,9 @@ impl App {
             hotkeys: None,
             tray: None,
             tray_error: String::new(),
-            close_prompt: false,
             level: 0.0,
+            rows: [[0.0; 2]; 2],
+            extra: 0.0,
         };
         match hotkeys {
             Ok(mut h) => {
@@ -176,9 +178,20 @@ impl App {
         }
     }
 
-    fn header(&mut self, ui: &mut Ui, phase: Phase) {
+    fn shortcut(&self) -> Option<&str> {
+        self.hotkeys
+            .as_ref()
+            .and_then(|h| h.active.as_ref())
+            .map(|(_, s)| s.as_str())
+    }
+
+    fn header(&mut self, ui: &mut Ui) {
+        let (phase, backend, ready) = {
+            let st = self.core.status();
+            (st.phase, st.backend.clone(), st.loaded.is_some())
+        };
         ui.horizontal(|ui| {
-            ui.label(RichText::new("fi-whisper").font(semibold(25.0)));
+            ui.label(RichText::new("fi-whisper").font(semibold(22.0)));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let color = match phase {
                     Phase::Error | Phase::Recording => DANGER,
@@ -186,16 +199,14 @@ impl App {
                     _ => ACCENT,
                 };
                 badge(ui, phase.label(), color);
+                if ready {
+                    badge(ui, &backend, MUTED);
+                }
             });
-        });
-        ui.add_space(8.0);
-        ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.settings, false, "Dikte");
-            ui.selectable_value(&mut self.settings, true, "Pengaturan");
         });
     }
 
-    fn dictation(&mut self, ui: &mut Ui) {
+    fn dictation_card(&mut self, ui: &mut Ui) {
         let st = self.core.status();
         let phase = st.phase;
         let recording = phase == Phase::Recording;
@@ -209,409 +220,315 @@ impl App {
             self.level = 0.0;
         }
         let (note, error) = (st.note.clone(), st.error.clone());
-        let (backend, timing) = (st.backend.clone(), st.timing);
         let ready = st.loaded.is_some();
         drop(st);
 
-        card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
+        ui.horizontal(|ui| {
             title(ui, "Dikte");
-            let shortcut = self
-                .hotkeys
-                .as_ref()
-                .and_then(|h| h.active.as_ref())
-                .map(|(_, s)| s.clone());
-            ui.label(
-                RichText::new(match &shortcut {
-                    Some(s) => format!(
-                        "Tekan {s} di aplikasi lain untuk dikte. Tombol di bawah hanya untuk uji."
-                    ),
-                    None => "Shortcut global tidak aktif. Tombol di bawah hanya untuk uji.".into(),
-                })
-                .color(MUTED),
-            );
-            ui.add_space(4.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(format!(
-                        "{:02}:{:02}",
-                        duration.as_secs() / 60,
-                        duration.as_secs() % 60
-                    ))
-                    .monospace()
-                    .size(36.0)
-                    .color(if recording { ACCENT } else { TEXT }),
-                );
-                ui.label(RichText::new("/ 02:00").monospace().color(MUTED));
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    ui.label(
-                        RichText::new(if recording {
-                            "Mikrofon aktif"
-                        } else {
-                            "Mikrofon tidak aktif"
-                        })
-                        .small()
-                        .color(MUTED),
-                    );
-                });
-            });
-            meter(ui, recording, self.level);
-            ui.add_space(8.0);
-            ui.horizontal_wrapped(|ui| {
-                let (enabled, label) = match phase {
-                    Phase::Recording => (true, "Selesai"),
-                    Phase::Transcribing => (false, "Memproses…"),
-                    Phase::Loading => (false, "Memuat…"),
-                    _ => (ready, "Mulai"),
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (text, color) = match self.shortcut() {
+                    Some(s) => (s.to_owned(), MUTED),
+                    None => ("Shortcut tidak aktif".to_owned(), WARN),
                 };
-                if primary(ui, enabled, label).clicked() {
-                    self.core.send(Cmd::Toggle(Source::Gui));
-                }
-                if matches!(phase, Phase::Recording | Phase::Transcribing)
-                    && ui.button("Batalkan").clicked()
-                {
-                    self.core.send(Cmd::Cancel);
-                }
-                if matches!(phase, Phase::Loading | Phase::Transcribing) {
-                    ui.spinner();
-                }
+                ui.label(RichText::new(text).small().color(color));
             });
-            ui.add_space(4.0);
-            if !error.is_empty() {
-                ui.label(RichText::new(&error).small().color(DANGER));
-            }
-            let hint = match phase {
-                Phase::MissingModel | Phase::Error if !ready => {
-                    "Pilih dan muat model di Pengaturan."
-                }
-                Phase::Recording => {
-                    "Tekan Selesai, shortcut, atau Batalkan. Berhenti otomatis pada 2 menit."
-                }
-                _ => "",
-            };
-            for text in [note.as_str(), hint] {
-                if !text.is_empty() {
-                    ui.label(RichText::new(text).small().color(MUTED));
-                }
-            }
         });
-        ui.add_space(8.0);
-        self.result_ui(ui);
-        ui.add_space(8.0);
-        ui.horizontal_wrapped(|ui| {
-            badge(
-                ui,
-                &format!("Backend: {backend}"),
-                if ready { ACCENT } else { MUTED },
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!(
+                    "{:02}:{:02}",
+                    duration.as_secs() / 60,
+                    duration.as_secs() % 60
+                ))
+                .monospace()
+                .size(34.0)
+                .color(if recording { ACCENT } else { TEXT }),
             );
-            let text = timing.map_or("Proses terakhir: —".into(), |(t, total)| {
-                format!(
-                    "Audio {:.1} dtk · VAD {:.2} · ASR {:.2} · total {:.2} dtk",
-                    t.audio.as_secs_f32(),
-                    t.vad.as_secs_f32(),
-                    t.asr.as_secs_f32(),
-                    total.as_secs_f32()
-                )
-            });
-            ui.label(RichText::new(text).small().color(MUTED));
+            ui.label(RichText::new("/ 02:00").monospace().color(MUTED));
         });
+        meter(ui, recording, self.level);
+        ui.horizontal(|ui| {
+            let (enabled, label) = match phase {
+                Phase::Recording => (true, "Selesai"),
+                Phase::Transcribing => (false, "Memproses…"),
+                Phase::Loading => (false, "Memuat…"),
+                _ => (ready, "Mulai"),
+            };
+            if primary(ui, enabled, label).clicked() {
+                self.core.send(Cmd::Toggle(Source::Gui));
+            }
+            if matches!(phase, Phase::Recording | Phase::Transcribing)
+                && ui.button("Batalkan").clicked()
+            {
+                self.core.send(Cmd::Cancel);
+            }
+        });
+        if !error.is_empty() {
+            ui.label(RichText::new(&error).small().color(DANGER));
+        }
+        if !note.is_empty() {
+            ui.label(RichText::new(&note).small().color(MUTED));
+        }
+        if !ready && matches!(phase, Phase::MissingModel | Phase::Error) {
+            ui.label(
+                RichText::new("Pilih model ASR dan VAD, lalu tekan Muat model.")
+                    .small()
+                    .color(MUTED),
+            );
+        }
     }
 
-    fn result_ui(&mut self, ui: &mut Ui) {
-        let (result, result_note) = {
+    fn result_card(&mut self, ui: &mut Ui) {
+        let (result, result_note, timing) = {
             let st = self.core.status();
-            (st.result.clone(), st.result_note.clone())
+            (st.result.clone(), st.result_note.clone(), st.timing)
         };
-        let mut copy_note = None;
-        card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            ui.horizontal(|ui| {
-                title(ui, "Hasil terakhir");
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add_enabled(!result.is_empty(), egui::Button::new("Hapus"))
-                        .clicked()
-                    {
-                        self.core.send(Cmd::ClearResult);
-                    }
-                    if ui
-                        .add_enabled(!result.is_empty(), egui::Button::new("Salin"))
-                        .clicked()
-                    {
-                        copy_note = Some(
-                            match windows::copy_text(
-                                self.window.hwnd.load(Ordering::SeqCst),
-                                &result,
-                            ) {
-                                Ok(()) => {
-                                    "Teks disalin ke clipboard (dikecualikan dari riwayat Windows)."
-                                        .to_owned()
-                                }
-                                Err(e) => e,
-                            },
-                        );
-                    }
-                });
+        title(ui, "Hasil terakhir");
+        egui::Frame::new()
+            .fill(INPUT)
+            .corner_radius(8)
+            .inner_margin(10)
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                egui::ScrollArea::vertical()
+                    .id_salt("result")
+                    .min_scrolled_height(120.0)
+                    .max_height(120.0)
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.set_min_height(120.0);
+                        if result.is_empty() {
+                            ui.label(RichText::new("Belum ada hasil.").color(MUTED));
+                        } else {
+                            ui.add(egui::Label::new(&result).selectable(true).wrap());
+                        }
+                    });
             });
-            ui.add_space(4.0);
-            egui::Frame::new()
-                .fill(INPUT)
-                .corner_radius(8)
-                .inner_margin(14)
-                .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    ui.set_min_height(70.0);
-                    if result.is_empty() {
-                        ui.label(
-                            RichText::new("Hasil dikte terakhir akan muncul di sini.").color(MUTED),
-                        );
-                    } else {
-                        ui.add(egui::Label::new(&result).selectable(true).wrap());
-                    }
-                });
-            if !result_note.is_empty() {
-                ui.label(RichText::new(&result_note).small().color(ACCENT));
+        let mut copy_note = None;
+        ui.horizontal(|ui| {
+            if ui
+                .add_enabled(!result.is_empty(), egui::Button::new("Salin"))
+                .clicked()
+            {
+                copy_note = Some(
+                    match windows::copy_text(self.window.hwnd.load(Ordering::SeqCst), &result) {
+                        Ok(()) => "Disalin ke clipboard.".to_owned(),
+                        Err(e) => e,
+                    },
+                );
             }
+            if ui
+                .add_enabled(!result.is_empty(), egui::Button::new("Hapus"))
+                .clicked()
+            {
+                self.core.send(Cmd::ClearResult);
+            }
+        });
+        if let Some((t, total)) = timing {
             ui.label(
-                RichText::new(
-                    "Hasil hanya disimpan di RAM sampai diganti, dihapus, atau aplikasi keluar.",
-                )
+                RichText::new(format!(
+                    "Audio {:.1} dtk · proses {:.2} dtk",
+                    t.audio.as_secs_f32(),
+                    total.as_secs_f32()
+                ))
                 .small()
                 .color(MUTED),
-            );
-        });
+            )
+            .on_hover_text(format!(
+                "VAD {:.2} dtk · ASR {:.2} dtk",
+                t.vad.as_secs_f32(),
+                t.asr.as_secs_f32()
+            ));
+        }
+        if !result_note.is_empty() {
+            ui.label(RichText::new(&result_note).small().color(ACCENT));
+        }
         if let Some(note) = copy_note {
             self.core.status().result_note = note;
         }
     }
 
-    fn settings_ui(&mut self, ui: &mut Ui) {
-        let (phase, backend, diagnostics, loaded, load_time) = {
+    fn input_card(&mut self, ui: &mut Ui) {
+        let idle = !self.core.status().phase.busy();
+        title(ui, "Pengaturan");
+        let width = ui.available_width();
+        let mut changed = false;
+        ui.add_enabled_ui(idle, |ui| {
+            field_label(ui, "Mikrofon");
+            let selected = match &self.config.microphone {
+                None => {
+                    let name = self
+                        .default_mic
+                        .as_ref()
+                        .and_then(|id| self.mics.iter().find(|m| &m.id == id))
+                        .map_or("tidak ada", |m| m.name.as_str());
+                    format!("Default · {name}")
+                }
+                Some(id) => self
+                    .mics
+                    .iter()
+                    .find(|m| &m.id == id)
+                    .map_or_else(|| "Perangkat tidak ditemukan".into(), |m| m.name.clone()),
+            };
+            let combo = egui::ComboBox::from_id_salt("microphone")
+                .width(width)
+                .truncate()
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    changed |= ui
+                        .selectable_value(&mut self.config.microphone, None, "Default sistem")
+                        .changed();
+                    for mic in &self.mics {
+                        changed |= ui
+                            .selectable_value(
+                                &mut self.config.microphone,
+                                Some(mic.id.clone()),
+                                &mic.name,
+                            )
+                            .changed();
+                    }
+                });
+            // Daftar perangkat diperbarui setiap kali dropdown dibuka.
+            if combo.response.clicked() {
+                self.refresh_mics();
+            }
+            field_label(ui, "Bahasa");
+            egui::ComboBox::from_id_salt("language")
+                .width(width)
+                .selected_text(self.config.language.label())
+                .show_ui(ui, |ui| {
+                    for language in Language::ALL {
+                        changed |= ui
+                            .selectable_value(&mut self.config.language, language, language.label())
+                            .changed();
+                    }
+                });
+            field_label(ui, "Shortcut");
+            ui.horizontal(|ui| {
+                let response = ui.add(
+                    egui::TextEdit::singleline(&mut self.shortcut_input)
+                        .desired_width(ui.available_width() - 104.0)
+                        .hint_text("Ctrl+Alt+Space"),
+                );
+                let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                if ui.button("Terapkan").clicked() || enter {
+                    self.apply_shortcut();
+                }
+            });
+        });
+        if !self.mic_error.is_empty() {
+            ui.label(RichText::new(&self.mic_error).small().color(WARN));
+        }
+        if !self.shortcut_error.is_empty() {
+            ui.label(RichText::new(&self.shortcut_error).small().color(WARN));
+        }
+        if changed {
+            self.refresh_mics();
+            self.save_config();
+            self.push_settings();
+        }
+
+        field_label(ui, "Tombol close");
+        let tray = self.tray.is_some();
+        let mut close_changed = false;
+        egui::ComboBox::from_id_salt("close-action")
+            .width(width)
+            .selected_text(if self.config.close_to_tray && tray {
+                "Sembunyikan ke tray"
+            } else {
+                "Keluar dari aplikasi"
+            })
+            .show_ui(ui, |ui| {
+                ui.add_enabled_ui(tray, |ui| {
+                    close_changed |= ui
+                        .selectable_value(
+                            &mut self.config.close_to_tray,
+                            true,
+                            "Sembunyikan ke tray",
+                        )
+                        .changed();
+                });
+                close_changed |= ui
+                    .selectable_value(
+                        &mut self.config.close_to_tray,
+                        false,
+                        "Keluar dari aplikasi",
+                    )
+                    .changed();
+            });
+        if close_changed {
+            self.save_config();
+        }
+        if !self.tray_error.is_empty() {
+            ui.label(RichText::new(&self.tray_error).small().color(WARN));
+        }
+    }
+
+    fn model_card(&mut self, ui: &mut Ui) {
+        let (phase, diagnostics, loaded, load_time) = {
             let st = self.core.status();
             (
                 st.phase,
-                st.backend.clone(),
                 st.diagnostics.clone(),
                 st.loaded.clone(),
                 st.load_time,
             )
         };
-        let idle = !phase.busy();
-        if !self.config_error.is_empty() {
-            card().show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                ui.label(RichText::new(&self.config_error).small().color(WARN));
-                if ui.button("Reset konfigurasi ke default").clicked() {
-                    self.config = Config::default();
-                    self.config_error.clear();
+        title(ui, "Model");
+        ui.add_enabled_ui(!phase.busy(), |ui| {
+            model_field(ui, "ASR", &mut self.asr);
+            model_field(ui, "VAD", &mut self.vad);
+            let same = loaded
+                .as_ref()
+                .is_some_and(|(a, v)| Some(a) == self.asr.as_ref() && Some(v) == self.vad.as_ref());
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        self.asr.is_some() && self.vad.is_some(),
+                        egui::Button::new(if same { "Muat ulang" } else { "Muat model" }),
+                    )
+                    .clicked()
+                    && let (Some(asr), Some(vad)) = (self.asr.clone(), self.vad.clone())
+                {
+                    self.config.asr_model = Some(asr.clone());
+                    self.config.vad_model = Some(vad.clone());
                     self.save_config();
-                    self.shortcut_input = self.config.shortcut.clone();
-                    self.push_settings();
+                    self.core.send(Cmd::Load { asr, vad });
+                }
+                if phase == Phase::Loading {
+                    ui.spinner();
+                } else if let (true, Some(t)) = (same, load_time) {
+                    ui.label(
+                        RichText::new(format!("Dimuat {:.1} dtk", t.as_secs_f32()))
+                            .small()
+                            .color(MUTED),
+                    );
                 }
             });
-            ui.add_space(8.0);
-        }
-        card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            title(ui, "Input & bahasa");
-            ui.add_space(4.0);
-            field_label(ui, "Mikrofon");
-            let mut changed = false;
-            ui.add_enabled_ui(idle, |ui| {
-                ui.horizontal(|ui| {
-                    let selected = match &self.config.microphone {
-                        None => {
-                            let name = self
-                                .default_mic
-                                .as_ref()
-                                .and_then(|id| self.mics.iter().find(|m| &m.id == id))
-                                .map_or("tidak ada", |m| m.name.as_str());
-                            format!("Default sistem · {name}")
-                        }
-                        Some(id) => self
-                            .mics
-                            .iter()
-                            .find(|m| &m.id == id)
-                            .map_or_else(|| "Perangkat tidak ditemukan".into(), |m| m.name.clone()),
-                    };
-                    egui::ComboBox::from_id_salt("microphone")
-                        .width((ui.available_width() - 110.0).max(200.0))
-                        .selected_text(selected)
-                        .show_ui(ui, |ui| {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.config.microphone,
-                                    None,
-                                    "Default sistem",
-                                )
-                                .changed();
-                            for mic in &self.mics {
-                                changed |= ui
-                                    .selectable_value(
-                                        &mut self.config.microphone,
-                                        Some(mic.id.clone()),
-                                        &mic.name,
-                                    )
-                                    .changed();
-                            }
-                        });
-                    if ui.button("Muat ulang").clicked() {
-                        self.refresh_mics();
+        });
+        if !diagnostics.is_empty() {
+            egui::CollapsingHeader::new(RichText::new("Diagnostik").small().color(MUTED))
+                .id_salt("diagnostics")
+                .show(ui, |ui| {
+                    for line in &diagnostics {
+                        ui.label(RichText::new(line).monospace().size(11.0).color(MUTED));
                     }
                 });
-            });
-            if !self.mic_error.is_empty() {
-                ui.label(RichText::new(&self.mic_error).small().color(WARN));
-            }
-            field_label(ui, "Bahasa transkripsi");
-            ui.add_enabled_ui(idle, |ui| {
-                egui::ComboBox::from_id_salt("language")
-                    .width(220.0)
-                    .selected_text(self.config.language.label())
-                    .show_ui(ui, |ui| {
-                        for language in Language::ALL {
-                            changed |= ui
-                                .selectable_value(
-                                    &mut self.config.language,
-                                    language,
-                                    language.label(),
-                                )
-                                .changed();
-                        }
-                    });
-            });
-            if changed {
-                self.refresh_mics();
+        }
+    }
+
+    fn config_error_card(&mut self, ui: &mut Ui) {
+        card().show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.label(RichText::new(&self.config_error).small().color(WARN));
+            if ui.button("Reset konfigurasi ke default").clicked() {
+                self.config = Config::default();
+                self.config_error.clear();
                 self.save_config();
+                self.shortcut_input = self.config.shortcut.clone();
                 self.push_settings();
             }
-            field_label(ui, "Shortcut mulai/selesai");
-            ui.add_enabled_ui(idle, |ui| {
-                ui.horizontal(|ui| {
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.shortcut_input)
-                            .desired_width(250.0)
-                            .hint_text("Ctrl+Alt+Space"),
-                    );
-                    if ui.button("Terapkan").clicked() {
-                        self.apply_shortcut();
-                    }
-                });
-            });
-            let active = self
-                .hotkeys
-                .as_ref()
-                .and_then(|h| h.active.as_ref())
-                .map(|(_, s)| s.as_str());
-            ui.label(
-                RichText::new(match active {
-                    Some(s) => format!("Aktif: {s}"),
-                    None => "Shortcut global tidak aktif.".into(),
-                })
-                .small()
-                .color(MUTED),
-            );
-            if !self.shortcut_error.is_empty() {
-                ui.label(RichText::new(&self.shortcut_error).small().color(WARN));
-            }
         });
-        ui.add_space(8.0);
-        card().show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            title(ui, "Model lokal");
-            ui.label(
-                RichText::new("Pilih file GGML whisper.cpp dari komputer Anda.")
-                    .small()
-                    .color(MUTED),
-            );
-            ui.add_enabled_ui(idle, |ui| {
-                model_field(
-                    ui,
-                    "Model ASR",
-                    "Whisper large-v3-turbo · ggml-large-v3-turbo.bin",
-                    &mut self.asr,
-                );
-                model_field(
-                    ui,
-                    "Model VAD",
-                    "Silero VAD · ggml-silero-v6.2.0.bin",
-                    &mut self.vad,
-                );
-                ui.add_space(4.0);
-                let same = loaded.as_ref().is_some_and(|(a, v)| {
-                    Some(a) == self.asr.as_ref() && Some(v) == self.vad.as_ref()
-                });
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
-                            self.asr.is_some() && self.vad.is_some(),
-                            egui::Button::new(if same {
-                                "Muat ulang model"
-                            } else {
-                                "Muat model"
-                            }),
-                        )
-                        .clicked()
-                        && let (Some(asr), Some(vad)) = (self.asr.clone(), self.vad.clone())
-                    {
-                        self.config.asr_model = Some(asr.clone());
-                        self.config.vad_model = Some(vad.clone());
-                        self.save_config();
-                        self.core.send(Cmd::Load { asr, vad });
-                    }
-                    if phase == Phase::Loading {
-                        ui.spinner();
-                    }
-                });
-            });
-            let status = match (&loaded, load_time) {
-                (Some((a, v)), Some(t)) => format!(
-                    "Aktif: {} + {} · dimuat {:.1} dtk",
-                    file_name(a),
-                    file_name(v),
-                    t.as_secs_f32()
-                ),
-                _ if phase == Phase::Loading => "Memuat model…".into(),
-                _ => "Belum ada model aktif.".into(),
-            };
-            ui.label(RichText::new(status).small().color(MUTED));
-            ui.label(
-                RichText::new(format!("Backend aktual: {backend}"))
-                    .small()
-                    .color(MUTED),
-            );
-            if !diagnostics.is_empty() {
-                egui::CollapsingHeader::new("Diagnostik backend")
-                    .id_salt("diagnostics")
-                    .show(ui, |ui| {
-                        for line in &diagnostics {
-                            ui.label(RichText::new(line).monospace().size(11.5).color(MUTED));
-                        }
-                    });
-            }
-        });
-        ui.add_space(8.0);
-        let path = self
-            .config_path
-            .as_ref()
-            .map_or("—".into(), |p| p.display().to_string());
-        ui.label(
-            RichText::new(format!("Konfigurasi: {path}"))
-                .small()
-                .color(MUTED),
-        );
-        ui.label(
-            RichText::new(if self.tray.is_some() {
-                "Menutup jendela menyembunyikan aplikasi ke tray. Pilih Keluar di menu tray untuk berhenti."
-            } else {
-                "Tray tidak tersedia; menutup jendela akan keluar dari aplikasi."
-            })
-            .small()
-            .color(MUTED),
-        );
-        if !self.tray_error.is_empty() {
-            ui.label(RichText::new(&self.tray_error).small().color(WARN));
-        }
     }
 
     fn apply_shortcut(&mut self) {
@@ -629,39 +546,32 @@ impl App {
         }
     }
 
-    fn hide(&self, ctx: &egui::Context) {
-        ctx.send_viewport_cmd(egui::ViewportCommand::Visible(false));
-    }
-
-    fn close_prompt_ui(&mut self, ctx: &egui::Context) {
-        if !self.close_prompt {
-            return;
-        }
-        let mut choice = None;
-        egui::Modal::new(egui::Id::unique("close-hint")).show(ctx, |ui| {
-            ui.set_width(380.0);
-            title(ui, "fi-whisper tetap berjalan");
-            ui.label("Jendela akan disembunyikan ke tray. Shortcut tetap aktif. Pilih Keluar di menu tray untuk menghentikan aplikasi.");
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if primary(ui, true, "Sembunyikan").clicked() {
-                    choice = Some(false);
-                }
-                if ui.button("Keluar").clicked() {
-                    choice = Some(true);
-                }
-            });
-        });
-        if let Some(quit) = choice {
-            self.close_prompt = false;
-            self.config.close_hint_shown = true;
-            self.save_config();
-            if quit {
-                self.window.quitting.store(true, Ordering::SeqCst);
-                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-            } else {
-                self.hide(ctx);
+    /// Satu baris dua kolom; kedua kartu disamakan tingginya memakai ukuran frame sebelumnya.
+    fn row(
+        &mut self,
+        ui: &mut Ui,
+        index: usize,
+        left: fn(&mut Self, &mut Ui),
+        right: fn(&mut Self, &mut Ui),
+    ) {
+        let previous = self.rows[index];
+        // Sisa tinggi jendela dibagi rata ke kedua baris agar kartu mengisi sampai bawah.
+        let target = previous[0].max(previous[1]) + self.extra / 2.0;
+        let mut heights = [0.0; 2];
+        ui.columns_const(|[l, r]: &mut [Ui; 2]| {
+            for (col, (ui, add)) in [(l, left), (r, right)].into_iter().enumerate() {
+                card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    // Harus sebelum isi: set_min_height di egui dihitung dari kursor saat ini.
+                    ui.set_min_height(target);
+                    // Tinggi scope = tinggi isi saja, tidak terpengaruh set_min_height.
+                    heights[col] = ui.scope(|ui| add(self, ui)).response.rect.height();
+                });
             }
+        });
+        if heights != previous {
+            self.rows[index] = heights;
+            ui.ctx().request_repaint();
         }
     }
 }
@@ -674,8 +584,8 @@ fn file_name(path: &Path) -> String {
 }
 
 fn meter(ui: &mut Ui, active: bool, level: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), egui::Sense::hover());
-    let count = 64;
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), egui::Sense::hover());
+    let count = ((rect.width() / 6.0) as usize).max(8);
     let step = rect.width() / count as f32;
     // Skala log sederhana: -60 dBFS..0 dBFS.
     let db = if level > 0.0 {
@@ -688,35 +598,41 @@ fn meter(ui: &mut Ui, active: bool, level: f32) {
         let on = active && i < filled;
         let bar = egui::Rect::from_center_size(
             egui::pos2(rect.left() + (i as f32 + 0.5) * step, rect.center().y),
-            vec2((step - 3.0).max(1.0), if on { 28.0 } else { 6.0 }),
+            vec2((step - 3.0).max(1.0), if on { 24.0 } else { 6.0 }),
         );
         ui.painter()
             .rect_filled(bar, 2.0, if on { ACCENT } else { BORDER });
     }
 }
 
-fn model_field(ui: &mut Ui, label: &str, description: &str, path: &mut Option<PathBuf>) {
+fn model_field(ui: &mut Ui, label: &str, path: &mut Option<PathBuf>) {
     field_label(ui, label);
     ui.horizontal(|ui| {
-        ui.vertical(|ui| {
-            ui.set_width((ui.available_width() - 110.0).max(150.0));
-            ui.label(
-                path.as_deref()
-                    .map_or_else(|| "Pilih file model".into(), file_name),
-            );
-            let detail = path
-                .as_ref()
-                .map_or_else(|| description.to_owned(), |p| p.display().to_string());
-            ui.add(egui::Label::new(RichText::new(detail).small().color(MUTED)).wrap());
-        });
-        if ui
-            .button(format!(
-                "Pilih {}",
-                label.strip_prefix("Model ").unwrap_or(label)
-            ))
-            .clicked()
+        let width = (ui.available_width() - 64.0).max(60.0);
+        ui.allocate_ui_with_layout(
+            vec2(width, ui.spacing().interact_size.y),
+            Layout::left_to_right(Align::Center),
+            |ui| {
+                ui.set_min_width(width);
+                let name = path
+                    .as_deref()
+                    .map_or_else(|| "Belum dipilih".into(), file_name);
+                let response = ui.add(
+                    egui::Label::new(RichText::new(name).color(if path.is_some() {
+                        TEXT
+                    } else {
+                        MUTED
+                    }))
+                    .truncate(),
+                );
+                if let Some(p) = path.as_deref() {
+                    response.on_hover_text(p.display().to_string());
+                }
+            },
+        );
+        if ui.button("Pilih").clicked()
             && let Some(selected) = rfd::FileDialog::new()
-                .set_title(label)
+                .set_title(format!("Model {label}"))
                 .add_filter("Model GGML", &["bin"])
                 .pick_file()
         {
@@ -731,13 +647,12 @@ impl eframe::App for App {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
         }
-        if ctx.input(|i| i.viewport().close_requested()) && self.tray.is_some() {
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.config.close_to_tray
+            && self.tray.is_some()
+        {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            if self.config.close_hint_shown {
-                self.hide(ctx);
-            } else {
-                self.close_prompt = true;
-            }
+            windows::hide_window(self.window.hwnd.load(Ordering::SeqCst));
         }
         if self.core.status().phase.busy() {
             ctx.request_repaint_after(Duration::from_millis(50));
@@ -745,39 +660,36 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
-        let phase = self.core.status().phase;
         egui::Panel::top("header")
             .resizable(false)
             .frame(
                 egui::Frame::new()
                     .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(24, 18)),
+                    .inner_margin(egui::Margin::symmetric(16, 12)),
             )
-            .show(root, |ui| self.header(ui, phase));
+            .show(root, |ui| self.header(ui));
         egui::CentralPanel::default()
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(24, 14)),
-            )
+            .frame(egui::Frame::new().fill(BG).inner_margin(16))
             .show(root, |ui| {
-                egui::ScrollArea::vertical()
-                    .id_salt(if self.settings {
-                        "settings"
-                    } else {
-                        "dictation"
-                    })
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        if self.settings {
-                            self.settings_ui(ui);
-                        } else {
-                            self.dictation(ui);
-                        }
-                    });
+                let available = ui.available_height();
+                // Cadangan bila jendela diperkecil atau pesan error panjang membuat isi melebihi tinggi.
+                egui::ScrollArea::vertical().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    if !self.config_error.is_empty() {
+                        self.config_error_card(ui);
+                    }
+                    self.row(ui, 0, Self::dictation_card, Self::result_card);
+                    self.row(ui, 1, Self::input_card, Self::model_card);
+                    // Koreksi linear dari frame ini; stabil setelah satu frame tambahan.
+                    // Dibulatkan ke bawah agar pembulatan piksel tidak memunculkan scrollbar.
+                    let used = ui.min_rect().height();
+                    let extra = (self.extra + available - used - 1.0).max(0.0).floor();
+                    if (extra - self.extra).abs() >= 1.0 {
+                        self.extra = extra;
+                        ui.ctx().request_repaint();
+                    }
+                });
             });
-        let ctx = root.ctx().clone();
-        self.close_prompt_ui(&ctx);
     }
 }
 
@@ -790,8 +702,8 @@ fn main() -> eframe::Result {
         "fi-whisper",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([860.0, 820.0])
-                .with_min_inner_size([620.0, 540.0]),
+                .with_inner_size([620.0, 730.0])
+                .with_min_inner_size([560.0, 600.0]),
             renderer: eframe::Renderer::Glow,
             centered: true,
             ..Default::default()

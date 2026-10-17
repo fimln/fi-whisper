@@ -192,7 +192,7 @@ impl Controller {
                 }
                 st.phase = Phase::Loading;
                 st.error.clear();
-                st.note = "Memuat model…".into();
+                st.note.clear();
                 drop(st);
                 self.worker.send(Job::Load { asr, vad });
             }
@@ -213,7 +213,7 @@ impl Controller {
                     return;
                 }
                 self.st().result_note = match outcome {
-                    Inserted::Done => "Teks dikirim ke jendela tujuan.".into(),
+                    Inserted::Done => String::new(),
                     Inserted::Blocked(reason) => {
                         format!("Hasil siap, tidak dimasukkan otomatis: {reason} Salin manual.")
                     }
@@ -263,13 +263,11 @@ impl Controller {
                 st.phase = Phase::Recording;
                 st.error.clear();
                 st.note = match (source, self.target) {
-                    (Source::Hotkey, Some(_)) => {
-                        "Merekam. Hasil akan diketik ke jendela yang tadi fokus.".into()
-                    }
+                    (Source::Hotkey, Some(_)) => String::new(),
                     (Source::Hotkey, None) => {
-                        "Merekam. Tidak ada jendela tujuan; hasil hanya tampil di sini.".into()
+                        "Tidak ada jendela tujuan; hasil hanya tampil di sini.".into()
                     }
-                    (Source::Gui, _) => "Merekam dari tombol. Hasil hanya tampil di panel.".into(),
+                    (Source::Gui, _) => "Hasil hanya tampil di sini.".into(),
                 };
                 st.recording_since = Some(Instant::now());
                 st.captured = Duration::ZERO;
@@ -294,7 +292,6 @@ impl Controller {
         self.awaiting_capture = true;
         let mut st = self.st();
         st.phase = Phase::Transcribing;
-        st.note = "Memproses audio…".into();
         if let Some(since) = st.recording_since.take() {
             st.captured = since.elapsed().min(audio::LIMIT);
         }
@@ -363,11 +360,9 @@ impl Controller {
                     self.stopped_at = Some(Instant::now());
                 }
                 st.captured = rec.captured;
-                st.note = if rec.hit_limit {
-                    "Batas 2 menit tercapai; rekaman dihentikan dan diproses.".into()
-                } else {
-                    "Mendeteksi ucapan dan mentranskripsi…".into()
-                };
+                if rec.hit_limit {
+                    st.note = "Batas 2 menit tercapai; rekaman diproses.".into();
+                }
                 drop(st);
                 self.worker.send(Job::Transcribe {
                     session,
@@ -404,7 +399,7 @@ impl Controller {
                 st.loaded = Some((asr, vad));
                 st.load_time = Some(took);
                 st.error.clear();
-                st.note = format!("Model dimuat dalam {:.1} dtk.", took.as_secs_f32());
+                st.note.clear();
             }
             transcribe::Event::LoadFailed(e) => {
                 let mut st = self.st();
@@ -447,7 +442,7 @@ impl Controller {
                         st.result_note = if target.is_some() {
                             "Memasukkan teks…".into()
                         } else {
-                            "Hasil hanya ditampilkan di sini.".into()
+                            String::new()
                         };
                         drop(st);
                         if let Some(target) = target {
@@ -460,8 +455,7 @@ impl Controller {
                         }
                     }
                     Outcome::NoSpeech => {
-                        st.note =
-                            "Tidak ada ucapan terdeteksi; tidak ada teks yang dimasukkan.".into();
+                        st.note = "Tidak ada ucapan terdeteksi.".into();
                     }
                     Outcome::Cancelled => st.note = "Proses dibatalkan.".into(),
                     Outcome::Failed(e) => {
