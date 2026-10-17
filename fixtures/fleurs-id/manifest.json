@@ -1,0 +1,28 @@
+{
+  "dataset": "google/fleurs",
+  "mirror": "FluidInference/fleurs-full",
+  "revision": "1cca811bb8ea4d370345f108f00518167040282c",
+  "language": "id_id",
+  "split": "test",
+  "license": "CC-BY-4.0",
+  "samples": [
+    {
+      "id": "id_id_0000",
+      "file": "id_id_0000.wav",
+      "sha256": "483dea3628adc905d86bfed5dbf983d80bccdbee0fe63afb371190748dc24401",
+      "reference": "tim-tim virtual memiliki standar keunggulan yang sama dengan tim konvensional tetapi ada sedikit perbedaan"
+    },
+    {
+      "id": "id_id_0001",
+      "file": "id_id_0001.wav",
+      "sha256": "be5c98250e75cbf7439450a7b6a3dbdc088f3b9310ea793fb26443035245e175",
+      "reference": "segera setelah permusuhan pecah britania memulai blokade laut jerman"
+    },
+    {
+      "id": "id_id_0002",
+      "file": "id_id_0002.wav",
+      "sha256": "cde68b8a60d0da873c1efc37758da2246bbc6c05d5e828d7d32e06f8b6668db6",
+      "reference": "semua nomina di samping kata sie untuk anda selalu dimulai dengan huruf kapital bahkan di tengah kalimat"
+    }
+  ]
+}

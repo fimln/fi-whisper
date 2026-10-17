@@ -1,0 +1,18 @@
+[package]
+name = "fi-whisper"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+
+[features]
+inspection = ["eframe/inspection"]
+
+[dependencies]
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow"] }
+rfd = "=0.17.2"
+
+[profile.release]
+opt-level = "s"
+lto = "thin"
+strip = true
