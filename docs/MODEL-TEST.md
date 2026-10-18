@@ -68,3 +68,15 @@ Ini membuktikan **file model + whisper.cpp CLI** pada mesin ini, belum membuktik
 CLI `--vad` memadatkan segmen ucapan dengan padding default. Backend rancangan memakai rentang ucapan pertama sampai terakhir agar jeda tengah dipertahankan; hasil/latensi dapat berbeda. Jangan menyalin pemadatan CLI tanpa meninjau kebutuhan tersebut. Pada sampel 0000 VAD mendeteksi dua segmen dan mereduksi audio sekitar 24,6%.
 
 Belum diuji: audio silence/noise-only, capture mikrofon, resampling/tail, rekaman 120 detik, cancel/stale result worker, hotkey, tray, injection, model menetap di RAM, atau pengujian akurasi 20 klip pengguna. Tidak melakukan tuning untuk memperbaiki tiga sampel ini, dan tidak menghubungkan UI. Tidak commit/push/publikasi.
+
+## Uji tiga mesin (aplikasi, GPU)
+
+`./scripts/build-cuda.ps1 test --locked --release '--' --ignored fixture --nocapture --test-threads=1` di RTX 5060 Laptop (driver 617.42, CUDA 13.4), tiga klip FLEURS yang sama, bahasa `id`. Waktu ASR per klip setelah VAD; load termasuk pemanasan GPU.
+
+| Mesin | Load | ASR per klip | Catatan hasil |
+| --- | --- | --- | --- |
+| Whisper large-v3-turbo | 3,3 dtk | 0,32-0,42 dtk | "Cerman", "hukum kapital" |
+| Qwen3-ASR 0.6B | 1,2 dtk | 0,32-0,38 dtk | kata benar, tanpa tanda baca dan kapital awal |
+| Qwen3-ASR 1.7B | 2,1 dtk | 0,49-0,62 dtk | kata benar, tanda baca dan kapital rapi |
+
+Ketiganya lulus deteksi bahasa otomatis, pembatalan di tengah proses, dan noise sintetis (`NoSpeech`). Load Qwen pertama pada driver baru sekitar 25 dtk karena kernel candle di-JIT dari PTX; berikutnya dibaca dari cache driver.

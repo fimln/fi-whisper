@@ -411,26 +411,10 @@ impl Drop for Tray {
     }
 }
 
-/// Ikon 32×32: lingkaran accent dengan tiga bar gelombang.
+/// Ikon tray dari logo aplikasi (Windows menskalakan ke ukuran tray).
 fn tray_icon_image() -> tray_icon::Icon {
-    const N: u32 = 32;
-    let mut rgba = Vec::with_capacity((N * N * 4) as usize);
-    for y in 0..N {
-        for x in 0..N {
-            let (dx, dy) = (x as f32 - 15.5, y as f32 - 15.5);
-            let inside = dx * dx + dy * dy <= 15.5 * 15.5;
-            let bar = [(10, 6.0), (15, 10.0), (20, 6.0)]
-                .iter()
-                .any(|&(bx, h): &(i32, f32)| (x as i32 - bx).abs() <= 1 && dy.abs() <= h);
-            let px = match (inside, bar) {
-                (true, true) => [0x0A, 0x0D, 0x0E, 0xFF],
-                (true, false) => [0x4F, 0xD1, 0xC5, 0xFF],
-                _ => [0, 0, 0, 0],
-            };
-            rgba.extend_from_slice(&px);
-        }
-    }
-    tray_icon::Icon::from_rgba(rgba, N, N).expect("ikon tray valid")
+    let n = crate::theme::LOGO_SIZE as u32;
+    tray_icon::Icon::from_rgba(crate::theme::LOGO_RGBA.to_vec(), n, n).expect("ikon tray valid")
 }
 
 #[cfg(test)]

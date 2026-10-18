@@ -7,7 +7,7 @@ mod theme;
 mod transcribe;
 mod windows;
 
-use config::{Config, Language};
+use config::{Config, Engine, Language};
 use controller::{Cmd, Handle, Phase, Source};
 use eframe::egui::{self, Align, Layout, RichText, Ui, vec2};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
@@ -25,12 +25,18 @@ struct Window {
 
 struct App {
     core: Handle,
+    logo: egui::TextureHandle,
+    icons: theme::Icons,
     window: Arc<Window>,
     config: Config,
     config_path: Option<PathBuf>,
     /// Error config rusak; selama ada, config tidak ditulis agar file lama tidak tertimpa.
     config_error: String,
+    /// Mesin yang dipilih di kartu Model (disimpan ke config saat Muat model).
+    engine: Engine,
     asr: Option<PathBuf>,
+    qwen: Option<PathBuf>,
+    qwen17: Option<PathBuf>,
     vad: Option<PathBuf>,
     mics: Vec<audio::Mic>,
     default_mic: Option<String>,
@@ -98,15 +104,26 @@ impl App {
 
         let mut app = Self {
             core,
+            logo: theme::logo_texture(&cc.egui_ctx),
+            icons: theme::Icons::load(&cc.egui_ctx),
             window,
+            engine: config.engine,
             asr: config
                 .asr_model
                 .clone()
-                .or_else(|| config::default_model(config::ASR_FILE)),
+                .or_else(|| config::default_model(config::ASR_DIR, config::ASR_FILE)),
+            qwen: config
+                .qwen_model
+                .clone()
+                .or_else(|| config::default_model_dir(config::QWEN_DIR)),
+            qwen17: config
+                .qwen17_model
+                .clone()
+                .or_else(|| config::default_model_dir(config::QWEN17_DIR)),
             vad: config
                 .vad_model
                 .clone()
-                .or_else(|| config::default_model(config::VAD_FILE)),
+                .or_else(|| config::default_model(config::VAD_DIR, config::VAD_FILE)),
             shortcut_input: config.shortcut.clone(),
             config,
             config_path,
@@ -137,10 +154,31 @@ impl App {
         }
         app.refresh_mics();
         app.push_settings();
-        if let (Some(asr), Some(vad)) = (app.asr.clone(), app.vad.clone()) {
-            app.core.send(Cmd::Load { asr, vad });
+        if let (Some(asr), Some(vad)) = (app.selected_asr(), app.vad.clone()) {
+            app.core.send(Cmd::Load {
+                engine: app.engine,
+                asr,
+                vad,
+            });
         }
         app
+    }
+
+    /// Model ASR untuk mesin yang sedang dipilih.
+    fn selected_asr(&self) -> Option<PathBuf> {
+        match self.engine {
+            Engine::Whisper => self.asr.clone(),
+            Engine::Qwen3Asr => self.qwen.clone(),
+            Engine::Qwen3Asr17 => self.qwen17.clone(),
+        }
+    }
+
+    fn asr_path_mut(&mut self, engine: Engine) -> &mut Option<PathBuf> {
+        match engine {
+            Engine::Whisper => &mut self.asr,
+            Engine::Qwen3Asr => &mut self.qwen,
+            Engine::Qwen3Asr17 => &mut self.qwen17,
+        }
     }
 
     fn save_config(&mut self) {
@@ -186,21 +224,41 @@ impl App {
     }
 
     fn header(&mut self, ui: &mut Ui) {
-        let (phase, backend, ready) = {
+        let (phase, backend, loaded) = {
             let st = self.core.status();
-            (st.phase, st.backend.clone(), st.loaded.is_some())
+            (
+                st.phase,
+                st.backend.clone(),
+                st.loaded.as_ref().map(|l| l.0),
+            )
         };
         ui.horizontal(|ui| {
-            ui.label(RichText::new("fi-whisper").font(semibold(22.0)));
+            ui.spacing_mut().item_spacing.x = 10.0;
+            ui.add(egui::Image::new((self.logo.id(), vec2(30.0, 30.0))));
+            ui.label(RichText::new("fi-whisper").font(semibold(21.0)).color(TEXT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let color = match phase {
-                    Phase::Error | Phase::Recording => DANGER,
-                    Phase::MissingModel => WARN,
-                    _ => ACCENT,
-                };
-                badge(ui, phase.label(), color);
-                if ready {
-                    badge(ui, &backend, MUTED);
+                ui.spacing_mut().item_spacing.x = 8.0;
+                link_badge(ui, &self.icons.home, None, LINK_HOME, HOME_URL);
+                link_badge(
+                    ui,
+                    &self.icons.github,
+                    Some(concat!("v", env!("CARGO_PKG_VERSION"))),
+                    ACCENT,
+                    REPO_URL,
+                );
+                badge(ui, phase.label(), phase_color(phase));
+                if let Some(engine) = loaded {
+                    // Lewati badge mesin bila jendela terlalu sempit agar tidak menimpa judul.
+                    let text = format!("{} · {backend}", engine.short());
+                    let width = ui
+                        .painter()
+                        .layout_no_wrap(text.clone(), medium(12.0), SECONDARY)
+                        .size()
+                        .x
+                        + 28.0;
+                    if ui.available_width() >= width {
+                        badge(ui, &text, SECONDARY);
+                    }
                 }
             });
         });
@@ -226,11 +284,12 @@ impl App {
         ui.horizontal(|ui| {
             title(ui, "Dikte");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let (text, color) = match self.shortcut() {
-                    Some(s) => (s.to_owned(), MUTED),
-                    None => ("Shortcut tidak aktif".to_owned(), WARN),
-                };
-                ui.label(RichText::new(text).small().color(color));
+                match self.shortcut() {
+                    Some(s) => keycap(ui, s),
+                    None => {
+                        ui.label(RichText::new("Shortcut tidak aktif").small().color(WARN));
+                    }
+                }
             });
         });
         ui.horizontal(|ui| {
@@ -241,24 +300,30 @@ impl App {
                     duration.as_secs() % 60
                 ))
                 .monospace()
-                .size(34.0)
-                .color(if recording { ACCENT } else { TEXT }),
+                .size(36.0)
+                .color(if recording { TEXT } else { SECONDARY }),
             );
             ui.label(RichText::new("/ 02:00").monospace().color(MUTED));
+            if recording {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    rec_indicator(ui);
+                });
+            }
         });
         meter(ui, recording, self.level);
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             let (enabled, label) = match phase {
                 Phase::Recording => (true, "Selesai"),
                 Phase::Transcribing => (false, "Memproses…"),
-                Phase::Loading => (false, "Memuat…"),
-                _ => (ready, "Mulai"),
+                Phase::Loading => (false, "Memuat model…"),
+                _ => (ready, "Mulai dikte"),
             };
-            if primary(ui, enabled, label).clicked() {
+            if primary(ui, enabled, recording, label).clicked() {
                 self.core.send(Cmd::Toggle(Source::Gui));
             }
             if matches!(phase, Phase::Recording | Phase::Transcribing)
-                && ui.button("Batalkan").clicked()
+                && secondary(ui, true, "Batalkan").clicked()
             {
                 self.core.send(Cmd::Cancel);
             }
@@ -267,13 +332,13 @@ impl App {
             ui.label(RichText::new(&error).small().color(DANGER));
         }
         if !note.is_empty() {
-            ui.label(RichText::new(&note).small().color(MUTED));
+            ui.label(RichText::new(&note).small().color(SECONDARY));
         }
         if !ready && matches!(phase, Phase::MissingModel | Phase::Error) {
             ui.label(
                 RichText::new("Pilih model ASR dan VAD, lalu tekan Muat model.")
                     .small()
-                    .color(MUTED),
+                    .color(SECONDARY),
             );
         }
     }
@@ -284,64 +349,71 @@ impl App {
             (st.result.clone(), st.result_note.clone(), st.timing)
         };
         title(ui, "Hasil terakhir");
-        egui::Frame::new()
-            .fill(INPUT)
-            .corner_radius(8)
-            .inner_margin(10)
-            .show(ui, |ui| {
-                ui.set_width(ui.available_width());
-                egui::ScrollArea::vertical()
-                    .id_salt("result")
-                    .min_scrolled_height(120.0)
-                    .max_height(120.0)
-                    .show(ui, |ui| {
-                        ui.set_width(ui.available_width());
-                        ui.set_min_height(120.0);
-                        if result.is_empty() {
-                            ui.label(RichText::new("Belum ada hasil.").color(MUTED));
-                        } else {
-                            ui.add(egui::Label::new(&result).selectable(true).wrap());
-                        }
-                    });
-            });
+        inset(false).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical()
+                .id_salt("result")
+                .min_scrolled_height(120.0)
+                .max_height(120.0)
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    ui.set_min_height(120.0);
+                    if result.is_empty() {
+                        ui.label(RichText::new("Hasil dikte akan muncul di sini.").color(MUTED));
+                    } else {
+                        ui.add(
+                            egui::Label::new(RichText::new(&result).size(15.0).color(TEXT))
+                                .selectable(true)
+                                .wrap(),
+                        );
+                    }
+                });
+        });
         let mut copy_note = None;
         ui.horizontal(|ui| {
-            if ui
-                .add_enabled(!result.is_empty(), egui::Button::new("Salin"))
-                .clicked()
-            {
+            if secondary(ui, !result.is_empty(), "Salin").clicked() {
                 copy_note = Some(
                     match windows::copy_text(self.window.hwnd.load(Ordering::SeqCst), &result) {
-                        Ok(()) => "Disalin ke clipboard.".to_owned(),
+                        Ok(()) => COPIED.to_owned(),
                         Err(e) => e,
                     },
                 );
             }
-            if ui
-                .add_enabled(!result.is_empty(), egui::Button::new("Hapus"))
-                .clicked()
-            {
+            if secondary(ui, !result.is_empty(), "Hapus").clicked() {
                 self.core.send(Cmd::ClearResult);
             }
         });
-        if let Some((t, total)) = timing {
-            ui.label(
-                RichText::new(format!(
-                    "Audio {:.1} dtk · proses {:.2} dtk",
-                    t.audio.as_secs_f32(),
-                    total.as_secs_f32()
-                ))
-                .small()
-                .color(MUTED),
-            )
-            .on_hover_text(format!(
-                "VAD {:.2} dtk · ASR {:.2} dtk",
-                t.vad.as_secs_f32(),
-                t.asr.as_secs_f32()
-            ));
+        if !result_note.is_empty() && result_note != COPIED {
+            ui.label(RichText::new(&result_note).small().color(WARN));
         }
-        if !result_note.is_empty() {
-            ui.label(RichText::new(&result_note).small().color(ACCENT));
+        // Baris sendiri (wrap) agar tidak bertabrakan dengan judul/tombol saat kolom sempit.
+        let status = match (result.is_empty(), result_note.as_str()) {
+            (false, COPIED) => Some(COPIED),
+            (false, "") => Some("Selesai"),
+            _ => None,
+        };
+        if status.is_some() || timing.is_some() {
+            ui.horizontal_wrapped(|ui| {
+                if let Some(text) = status {
+                    ui.label(RichText::new(text).small().color(SUCCESS));
+                }
+                if let Some((t, total)) = timing {
+                    ui.label(
+                        RichText::new(format!(
+                            "{:.1} dtk audio · {:.2} dtk proses",
+                            t.audio.as_secs_f32(),
+                            total.as_secs_f32()
+                        ))
+                        .small()
+                        .color(SECONDARY),
+                    )
+                    .on_hover_text(format!(
+                        "VAD {:.2} dtk · ASR {:.2} dtk",
+                        t.vad.as_secs_f32(),
+                        t.asr.as_secs_f32()
+                    ));
+                }
+            });
         }
         if let Some(note) = copy_note {
             self.core.status().result_note = note;
@@ -405,13 +477,26 @@ impl App {
                 });
             field_label(ui, "Shortcut");
             ui.horizontal(|ui| {
+                let id = egui::Id::unique("shortcut-input");
+                let focused = ui.memory(|m| m.has_focus(id));
                 let response = ui.add(
                     egui::TextEdit::singleline(&mut self.shortcut_input)
+                        .id(id)
                         .desired_width(ui.available_width() - 104.0)
-                        .hint_text("Ctrl+Alt+Space"),
+                        .hint_text(RichText::new("Ctrl+Alt+Space").color(MUTED))
+                        .frame(
+                            egui::Frame::new()
+                                .fill(INPUT)
+                                .stroke(egui::Stroke::new(
+                                    1.0,
+                                    if focused { ACCENT_BORDER } else { BORDER },
+                                ))
+                                .corner_radius(8)
+                                .inner_margin(egui::Margin::symmetric(11, 8)),
+                        ),
                 );
                 let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if ui.button("Terapkan").clicked() || enter {
+                if secondary(ui, true, "Terapkan").clicked() || enter {
                     self.apply_shortcut();
                 }
             });
@@ -475,43 +560,96 @@ impl App {
             )
         };
         title(ui, "Model");
+        // Folder Qwen yang belum dipilih dicari ulang agar model yang baru diunduh langsung terdeteksi.
+        for (path, dir) in [
+            (&mut self.qwen, config::QWEN_DIR),
+            (&mut self.qwen17, config::QWEN17_DIR),
+        ] {
+            if path.is_none() {
+                *path = config::default_model_dir(dir);
+            }
+        }
         ui.add_enabled_ui(!phase.busy(), |ui| {
-            model_field(ui, "ASR", &mut self.asr);
-            model_field(ui, "VAD", &mut self.vad);
-            let same = loaded
-                .as_ref()
-                .is_some_and(|(a, v)| Some(a) == self.asr.as_ref() && Some(v) == self.vad.as_ref());
+            field_label(ui, "Mesin ASR");
+            egui::ComboBox::from_id_salt("engine")
+                .width(ui.available_width())
+                .selected_text(self.engine.label())
+                .show_ui(ui, |ui| {
+                    for engine in Engine::ALL {
+                        ui.selectable_value(&mut self.engine, engine, engine.label());
+                    }
+                });
+            let engine = self.engine;
+            let (label, pick) = if engine.is_qwen() {
+                ("Folder model", Pick::Folder)
+            } else {
+                ("File model ASR", Pick::GgmlFile)
+            };
+            model_field(
+                ui,
+                label,
+                pick,
+                engine.default_name(),
+                self.asr_path_mut(engine),
+            );
+            model_field(
+                ui,
+                "VAD (Silero)",
+                Pick::GgmlFile,
+                &format!(r"{}\{}", config::VAD_DIR, config::VAD_FILE),
+                &mut self.vad,
+            );
+            let selected = self.selected_asr();
+            let same = loaded.as_ref().is_some_and(|(e, a, v)| {
+                *e == self.engine && Some(a) == selected.as_ref() && Some(v) == self.vad.as_ref()
+            });
+            ui.add_space(2.0);
             ui.horizontal(|ui| {
+                let button = if same {
+                    egui::Button::new("Muat ulang")
+                } else {
+                    // Pilihan berbeda dari model aktif: tonjolkan aksi yang perlu dilakukan.
+                    egui::Button::new(RichText::new("Muat model").color(ACCENT_HOVER))
+                        .fill(ACCENT_TINT)
+                        .stroke(egui::Stroke::new(1.0, ACCENT_BORDER))
+                };
                 if ui
-                    .add_enabled(
-                        self.asr.is_some() && self.vad.is_some(),
-                        egui::Button::new(if same { "Muat ulang" } else { "Muat model" }),
-                    )
+                    .add_enabled(selected.is_some() && self.vad.is_some(), button)
                     .clicked()
-                    && let (Some(asr), Some(vad)) = (self.asr.clone(), self.vad.clone())
+                    && let (Some(asr), Some(vad)) = (selected.clone(), self.vad.clone())
                 {
-                    self.config.asr_model = Some(asr.clone());
+                    self.config.engine = self.engine;
+                    match self.engine {
+                        Engine::Whisper => self.config.asr_model = Some(asr.clone()),
+                        Engine::Qwen3Asr => self.config.qwen_model = Some(asr.clone()),
+                        Engine::Qwen3Asr17 => self.config.qwen17_model = Some(asr.clone()),
+                    }
                     self.config.vad_model = Some(vad.clone());
                     self.save_config();
-                    self.core.send(Cmd::Load { asr, vad });
+                    self.core.send(Cmd::Load {
+                        engine: self.engine,
+                        asr,
+                        vad,
+                    });
                 }
                 if phase == Phase::Loading {
                     ui.spinner();
+                    ui.label(RichText::new("Memuat…").small().color(SECONDARY));
                 } else if let (true, Some(t)) = (same, load_time) {
                     ui.label(
                         RichText::new(format!("Dimuat {:.1} dtk", t.as_secs_f32()))
                             .small()
-                            .color(MUTED),
+                            .color(SECONDARY),
                     );
                 }
             });
         });
         if !diagnostics.is_empty() {
-            egui::CollapsingHeader::new(RichText::new("Diagnostik").small().color(MUTED))
+            egui::CollapsingHeader::new(RichText::new("Diagnostik").small().color(SECONDARY))
                 .id_salt("diagnostics")
                 .show(ui, |ui| {
                     for line in &diagnostics {
-                        ui.label(RichText::new(line).monospace().size(11.0).color(MUTED));
+                        ui.label(RichText::new(line).monospace().size(11.0).color(SECONDARY));
                     }
                 });
         }
@@ -583,8 +721,44 @@ fn file_name(path: &Path) -> String {
     )
 }
 
+const COPIED: &str = "Disalin ke clipboard.";
+const REPO_URL: &str = "https://github.com/fimln/fi-whisper";
+const HOME_URL: &str = "https://alfi.ai.id";
+
+fn phase_color(phase: Phase) -> egui::Color32 {
+    match phase {
+        Phase::Ready => SUCCESS,
+        Phase::Recording | Phase::Error => DANGER,
+        Phase::Loading | Phase::Transcribing => ACCENT,
+        Phase::MissingModel => WARN,
+    }
+}
+
+/// Shortcut ditampilkan sebagai keycap.
+fn keycap(ui: &mut Ui, text: &str) {
+    egui::Frame::new()
+        .fill(RAISED)
+        .stroke(egui::Stroke::new(1.0, BORDER))
+        .corner_radius(6)
+        .inner_margin(egui::Margin::symmetric(8, 3))
+        .show(ui, |ui| {
+            ui.label(RichText::new(text).monospace().size(11.5).color(SECONDARY));
+        });
+}
+
+/// Indikator rekaman live (merah berdenyut), terpisah dari tombol utama.
+fn rec_indicator(ui: &mut Ui) {
+    let t = ui.input(|i| i.time) as f32;
+    let pulse = 0.55 + 0.45 * (t * 4.0).sin().abs();
+    ui.label(RichText::new("REC").font(semibold(12.0)).color(DANGER));
+    let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
+    let painter = ui.painter();
+    painter.circle_filled(rect.center(), 7.0, DANGER.gamma_multiply(0.2 * pulse));
+    painter.circle_filled(rect.center(), 4.0, DANGER.gamma_multiply(pulse));
+}
+
 fn meter(ui: &mut Ui, active: bool, level: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 28.0), egui::Sense::hover());
+    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), egui::Sense::hover());
     let count = ((rect.width() / 6.0) as usize).max(8);
     let step = rect.width() / count as f32;
     // Skala log sederhana: -60 dBFS..0 dBFS.
@@ -594,51 +768,93 @@ fn meter(ui: &mut Ui, active: bool, level: f32) {
         -60.0
     };
     let filled = (((db + 60.0) / 60.0).clamp(0.0, 1.0) * count as f32) as usize;
+    let t = ui.input(|i| i.time) as f32;
     for i in 0..count {
         let on = active && i < filled;
+        // Tinggi bar bervariasi agar terbaca sebagai gelombang suara, bukan progress bar.
+        let wave = 0.55 + 0.45 * ((i as f32 * 0.9 + t * 7.0).sin() * 0.5 + 0.5);
+        let height = if on { 8.0 + 24.0 * wave } else { 4.0 };
         let bar = egui::Rect::from_center_size(
             egui::pos2(rect.left() + (i as f32 + 0.5) * step, rect.center().y),
-            vec2((step - 3.0).max(1.0), if on { 24.0 } else { 6.0 }),
+            vec2((step - 3.0).max(1.0), height),
         );
-        ui.painter()
-            .rect_filled(bar, 2.0, if on { ACCENT } else { BORDER });
+        let color = if !on {
+            BORDER
+        } else if i + 1 == filled {
+            ACCENT_HOVER
+        } else {
+            ACCENT
+        };
+        ui.painter().rect_filled(bar, 2.0, color);
     }
 }
 
-fn model_field(ui: &mut Ui, label: &str, path: &mut Option<PathBuf>) {
+#[derive(Clone, Copy)]
+enum Pick {
+    GgmlFile,
+    Folder,
+}
+
+/// `default` = nama file/folder bawaan di `models\`, dipakai sebagai petunjuk bila belum ada.
+fn model_field(ui: &mut Ui, label: &str, pick: Pick, default: &str, path: &mut Option<PathBuf>) {
     field_label(ui, label);
+    let exists = path.as_deref().is_some_and(|p| match pick {
+        Pick::GgmlFile => p.is_file(),
+        Pick::Folder => p.join("config.json").is_file(),
+    });
     ui.horizontal(|ui| {
-        let width = (ui.available_width() - 64.0).max(60.0);
-        ui.allocate_ui_with_layout(
-            vec2(width, ui.spacing().interact_size.y),
-            Layout::left_to_right(Align::Center),
-            |ui| {
-                ui.set_min_width(width);
-                let name = path
-                    .as_deref()
-                    .map_or_else(|| "Belum dipilih".into(), file_name);
-                let response = ui.add(
-                    egui::Label::new(RichText::new(name).color(if path.is_some() {
-                        TEXT
-                    } else {
-                        MUTED
-                    }))
-                    .truncate(),
+        let width = (ui.available_width() - 72.0).max(60.0);
+        let color = match (path.is_some(), exists) {
+            (true, true) => TEXT,
+            (true, false) => DANGER,
+            _ => MUTED,
+        };
+        let response = egui::Frame::new()
+            .fill(INPUT)
+            .stroke(egui::Stroke::new(1.0, BORDER))
+            .corner_radius(8)
+            .inner_margin(egui::Margin::symmetric(10, 0))
+            .show(ui, |ui| {
+                ui.allocate_ui_with_layout(
+                    vec2(width - 22.0, ui.spacing().interact_size.y - 2.0),
+                    Layout::left_to_right(Align::Center),
+                    |ui| {
+                        ui.set_min_width(width - 22.0);
+                        let name = path
+                            .as_deref()
+                            .map_or_else(|| "Belum dipilih".into(), file_name);
+                        ui.add(egui::Label::new(RichText::new(name).color(color)).truncate());
+                    },
                 );
-                if let Some(p) = path.as_deref() {
-                    response.on_hover_text(p.display().to_string());
-                }
-            },
-        );
-        if ui.button("Pilih").clicked()
-            && let Some(selected) = rfd::FileDialog::new()
-                .set_title(format!("Model {label}"))
-                .add_filter("Model GGML", &["bin"])
-                .pick_file()
-        {
-            *path = Some(selected);
+            })
+            .response;
+        match path.as_deref() {
+            Some(p) if exists => {
+                response.on_hover_text(p.display().to_string());
+            }
+            Some(p) => {
+                response.on_hover_text(format!("Tidak ditemukan: {}", p.display()));
+            }
+            None => {}
+        }
+        if secondary(ui, true, "Pilih").clicked() {
+            let dialog = rfd::FileDialog::new().set_title(format!("Pilih {label}"));
+            let selected = match pick {
+                Pick::GgmlFile => dialog.add_filter("Model GGML", &["bin"]).pick_file(),
+                Pick::Folder => dialog.pick_folder(),
+            };
+            if let Some(selected) = selected {
+                *path = Some(selected);
+            }
         }
     });
+    if !exists {
+        ui.label(
+            RichText::new(format!("Belum ada di models\\{default}"))
+                .small()
+                .color(WARN),
+        );
+    }
 }
 
 impl eframe::App for App {
@@ -703,7 +919,8 @@ fn main() -> eframe::Result {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_inner_size([620.0, 730.0])
-                .with_min_inner_size([560.0, 600.0]),
+                .with_min_inner_size([560.0, 600.0])
+                .with_icon(theme::icon()),
             renderer: eframe::Renderer::Glow,
             centered: true,
             ..Default::default()

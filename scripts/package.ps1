@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# Membuat folder portable dist/fi-whisper: exe CUDA, DLL cuBLAS yang diimpor, dan lisensi.
+# Membuat folder portable dist/fi-whisper: exe CUDA (Whisper + Qwen3-ASR), DLL CUDA runtime, dan lisensi.
 # Model tidak disertakan; letakkan di dist/fi-whisper/models atau %LOCALAPPDATA%\fi-whisper\models.
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -12,8 +12,10 @@ $dist = Join-Path $root 'dist\fi-whisper'
 if (Test-Path -LiteralPath $dist) { Remove-Item -LiteralPath $dist -Recurse -Force }
 New-Item -ItemType Directory -Force (Join-Path $dist 'licenses') | Out-Null
 Copy-Item (Join-Path $root 'target\release\fi-whisper.exe') $dist
+Copy-Item (Join-Path $root 'assets\logo.ico') $dist
 # fi-whisper.exe mengimpor cublas64_13.dll, yang memuat cublasLt64_13.dll. cudart ditautkan statis.
-foreach ($dll in 'cublas64_13.dll', 'cublasLt64_13.dll') { Copy-Item (Join-Path $cuda "bin\x64\$dll") $dist }
+# Qwen3-ASR (candle) memuat NVRTC (+builtins) dan cuRAND secara dinamis saat runtime.
+foreach ($dll in 'cublas64_13.dll', 'cublasLt64_13.dll', 'nvrtc64_130_0.dll', 'nvrtc-builtins64_132.dll', 'curand64_10.dll') { Copy-Item (Join-Path $cuda "bin\x64\$dll") $dist }
 Copy-Item (Join-Path $cuda 'LICENSE') (Join-Path $dist 'licenses\NVIDIA-CUDA-EULA.txt')
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $dist 'licenses\fi-whisper-MIT.txt')
 Copy-Item (Join-Path $root 'fonts\*.txt') (Join-Path $dist 'licenses')

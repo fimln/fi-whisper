@@ -7,6 +7,59 @@ use std::path::{Path, PathBuf};
 
 pub const ASR_FILE: &str = "ggml-large-v3-turbo.bin";
 pub const VAD_FILE: &str = "ggml-silero-v6.2.0.bin";
+/// Subfolder `models\` untuk file GGML di atas (sejajar dengan folder Qwen).
+pub const ASR_DIR: &str = "whisper-large-v3-turbo";
+pub const VAD_DIR: &str = "silero-vad-v6.2.0";
+/// Folder checkpoint Transformers `Qwen/Qwen3-ASR-0.6B-hf` (config.json, model.safetensors, tokenizer.json).
+pub const QWEN_DIR: &str = "Qwen3-ASR-0.6B-hf";
+/// Folder checkpoint `Qwen/Qwen3-ASR-1.7B-hf` (layout sama dengan 0.6B-hf).
+pub const QWEN17_DIR: &str = "Qwen3-ASR-1.7B-hf";
+
+/// Mesin ASR. VAD Silero dipakai oleh semuanya.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Engine {
+    #[default]
+    #[serde(rename = "whisper")]
+    Whisper,
+    /// Nama serde lama dipertahankan agar config versi sebelumnya tetap terbaca sebagai 0.6B.
+    #[serde(rename = "qwen3-asr")]
+    Qwen3Asr,
+    #[serde(rename = "qwen3-asr-1.7b")]
+    Qwen3Asr17,
+}
+
+impl Engine {
+    pub const ALL: [Self; 3] = [Self::Whisper, Self::Qwen3Asr, Self::Qwen3Asr17];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Whisper => "Whisper large-v3-turbo",
+            Self::Qwen3Asr => "Qwen3-ASR 0.6B",
+            Self::Qwen3Asr17 => "Qwen3-ASR 1.7B",
+        }
+    }
+
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Whisper => "Whisper",
+            Self::Qwen3Asr => "Qwen3 0.6B",
+            Self::Qwen3Asr17 => "Qwen3 1.7B",
+        }
+    }
+
+    pub fn is_qwen(self) -> bool {
+        matches!(self, Self::Qwen3Asr | Self::Qwen3Asr17)
+    }
+
+    /// Lokasi model bawaan relatif ke `models\` (file untuk Whisper, folder untuk Qwen).
+    pub fn default_name(self) -> &'static str {
+        match self {
+            Self::Whisper => r"whisper-large-v3-turbo\ggml-large-v3-turbo.bin",
+            Self::Qwen3Asr => QWEN_DIR,
+            Self::Qwen3Asr17 => QWEN17_DIR,
+        }
+    }
+}
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Language {
@@ -38,12 +91,26 @@ impl Language {
             Self::English => "English (en)",
         }
     }
+
+    /// Nama bahasa untuk prompt Qwen3-ASR (`language Indonesian<asr_text>`); `None` = deteksi.
+    pub fn qwen_name(self) -> Option<&'static str> {
+        match self {
+            Self::Indonesian => Some("Indonesian"),
+            Self::Auto => None,
+            Self::English => Some("English"),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
+    pub engine: Engine,
     pub asr_model: Option<PathBuf>,
+    /// Folder model Qwen3-ASR 0.6B.
+    pub qwen_model: Option<PathBuf>,
+    /// Folder model Qwen3-ASR 1.7B.
+    pub qwen17_model: Option<PathBuf>,
     pub vad_model: Option<PathBuf>,
     /// ID perangkat CPAL; `None` berarti input default sistem.
     pub microphone: Option<String>,
@@ -56,7 +123,10 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            engine: Engine::Whisper,
             asr_model: None,
+            qwen_model: None,
+            qwen17_model: None,
             vad_model: None,
             microphone: None,
             language: Language::Indonesian,
@@ -98,22 +168,35 @@ pub fn save(path: &Path, config: &Config) -> io::Result<()> {
     fs::rename(&tmp, path)
 }
 
-/// Lokasi model bawaan bila konfigurasi belum memilih file.
-pub fn default_model(file: &str) -> Option<PathBuf> {
+/// Lokasi file model GGML bawaan bila konfigurasi belum memilih file:
+/// `models\<dir>\<file>`, lalu `models\<file>` (layout lama).
+pub fn default_model(dir: &str, file: &str) -> Option<PathBuf> {
+    model_candidates(dir)
+        .map(|d| d.join(file))
+        .chain(model_candidates(file))
+        .find(|p| p.is_file())
+}
+
+/// Lokasi folder model Qwen3-ASR bawaan (harus berisi config.json).
+pub fn default_model_dir(dir: &str) -> Option<PathBuf> {
+    model_candidates(dir).find(|p| p.join("config.json").is_file())
+}
+
+fn model_candidates(name: &str) -> impl Iterator<Item = PathBuf> {
     let mut candidates = Vec::new();
     if let Some(dir) = app_dir() {
-        candidates.push(dir.join("models").join(file));
+        candidates.push(dir.join("models").join(name));
     }
     if let Some(dir) = std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(Path::to_owned))
     {
-        candidates.push(dir.join("models").join(file));
+        candidates.push(dir.join("models").join(name));
     }
     if let Ok(dir) = std::env::current_dir() {
-        candidates.push(dir.join("models").join(file));
+        candidates.push(dir.join("models").join(name));
     }
-    candidates.into_iter().find(|p| p.is_file())
+    candidates.into_iter()
 }
 
 #[cfg(test)]
@@ -143,6 +226,11 @@ mod tests {
     fn missing_fields_use_defaults() {
         let config: Config = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
         assert_eq!(config.language, Language::English);
+        assert_eq!(config.engine, Engine::Whisper);
+        let config: Config = serde_json::from_str(r#"{"engine":"qwen3-asr"}"#).unwrap();
+        assert_eq!(config.engine, Engine::Qwen3Asr);
+        let config: Config = serde_json::from_str(r#"{"engine":"qwen3-asr-1.7b"}"#).unwrap();
+        assert_eq!(config.engine, Engine::Qwen3Asr17);
         assert_eq!(config.shortcut, "Ctrl+Alt+Space");
         assert!(config.close_to_tray);
         // Field lama dari versi sebelumnya diabaikan.

@@ -1,6 +1,6 @@
 //! Worker tunggal yang memiliki model ASR dan VAD; model dimuat sekali dan dipakai ulang.
 
-use crate::config::Language;
+use crate::config::{Engine, Language};
 use std::ffi::{CStr, c_char, c_void};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -17,9 +17,12 @@ const SAMPLES_PER_CS: f32 = 160.0; // 16 kHz, timestamp VAD dalam centidetik
 const RANGE_PAD: usize = 3_200; // 200 ms padding di awal/akhir rentang ucapan
 const MIN_ASR: usize = 16_000; // whisper.cpp kurang stabil untuk audio < 1 detik
 const NO_SPEECH_MAX: f32 = 0.6; // sama dengan no_speech_thold bawaan Whisper
+/// Batas token keluaran Qwen3-ASR; 2 menit ucapan cepat < ~800 token.
+const QWEN_MAX_TOKENS: usize = 1024;
 
 pub enum Job {
     Load {
+        engine: Engine,
         asr: PathBuf,
         vad: PathBuf,
     },
@@ -47,6 +50,7 @@ pub struct Timing {
 
 pub enum Event {
     Loaded {
+        engine: Engine,
         asr: PathBuf,
         vad: PathBuf,
         backend: String,
@@ -90,10 +94,20 @@ impl Worker {
 }
 
 struct Models {
+    asr: Asr,
+    vad: WhisperVadContext,
+}
+
+enum Asr {
+    Whisper(WhisperAsr),
+    // Di-box: struct model candle jauh lebih besar dari handle whisper.cpp.
+    Qwen(Box<qwen3_asr::AsrInference>),
+}
+
+struct WhisperAsr {
     // `state` harus di-drop sebelum context.
     state: WhisperState,
     _ctx: WhisperContext,
-    vad: WhisperVadContext,
 }
 
 fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: impl Fn(Event)) {
@@ -101,16 +115,18 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: impl Fn(Event
     let threads = thread::available_parallelism().map_or(4, |n| n.get().min(8)) as i32;
     while let Ok(job) = rx.recv() {
         match job {
-            Job::Load { asr, vad } => {
+            Job::Load { engine, asr, vad } => {
                 let started = Instant::now();
                 take_log();
                 // Model lama tetap aktif sampai model baru berhasil dimuat.
-                match load(&asr, &vad, threads) {
-                    Ok(new) => {
+                match load(engine, &asr, &vad, threads) {
+                    Ok((new, qwen_backend)) => {
                         drop(models.replace(new));
                         let diagnostics = take_log();
+                        let backend = qwen_backend.unwrap_or_else(|| backend_summary(&diagnostics));
                         events(Event::Loaded {
-                            backend: backend_summary(&diagnostics),
+                            engine,
+                            backend,
                             asr,
                             vad,
                             diagnostics,
@@ -150,14 +166,35 @@ fn path_str(path: &Path) -> Result<&str, String> {
         .ok_or_else(|| format!("Path model tidak valid: {}", path.display()))
 }
 
-fn load(asr: &Path, vad: &Path, threads: i32) -> Result<Models, String> {
-    for (path, label) in [(asr, "ASR"), (vad, "VAD")] {
-        if !path.is_file() {
-            return Err(format!(
-                "File model {label} tidak ditemukan: {}",
-                path.display()
-            ));
+/// Mengembalikan model dan, untuk Qwen3-ASR, ringkasan backend (Whisper memakai log ggml).
+fn load(
+    engine: Engine,
+    asr: &Path,
+    vad: &Path,
+    threads: i32,
+) -> Result<(Models, Option<String>), String> {
+    if !vad.is_file() {
+        return Err(format!("File model VAD tidak ditemukan: {}", vad.display()));
+    }
+    let mut vad_params = WhisperVadContextParams::default();
+    vad_params.set_n_threads(threads.min(4));
+    vad_params.set_use_gpu(false);
+    let vad = WhisperVadContext::new(path_str(vad)?, vad_params).map_err(|e| {
+        format!("Model VAD gagal dimuat ({e}). Gunakan model Silero GGML untuk whisper.cpp.")
+    })?;
+    let (asr, backend) = match engine {
+        Engine::Whisper => (Asr::Whisper(load_whisper(asr)?), None),
+        Engine::Qwen3Asr | Engine::Qwen3Asr17 => {
+            let (model, backend) = load_qwen(asr)?;
+            (Asr::Qwen(Box::new(model)), Some(backend))
         }
+    };
+    Ok((Models { asr, vad }, backend))
+}
+
+fn load_whisper(asr: &Path) -> Result<WhisperAsr, String> {
+    if !asr.is_file() {
+        return Err(format!("File model ASR tidak ditemukan: {}", asr.display()));
     }
     let mut params = WhisperContextParameters::default();
     params.use_gpu(cfg!(feature = "cuda"));
@@ -167,17 +204,59 @@ fn load(asr: &Path, vad: &Path, threads: i32) -> Result<Models, String> {
     let state = ctx.create_state().map_err(|e| {
         format!("State ASR gagal dibuat ({e}); memori GPU/RAM mungkin tidak cukup.")
     })?;
-    let mut vad_params = WhisperVadContextParams::default();
-    vad_params.set_n_threads(threads.min(4));
-    vad_params.set_use_gpu(false);
-    let vad = WhisperVadContext::new(path_str(vad)?, vad_params).map_err(|e| {
-        format!("Model VAD gagal dimuat ({e}). Gunakan model Silero GGML untuk whisper.cpp.")
-    })?;
-    Ok(Models {
-        state,
-        _ctx: ctx,
-        vad,
-    })
+    Ok(WhisperAsr { state, _ctx: ctx })
+}
+
+/// File yang wajib ada di folder checkpoint Qwen3-ASR (`-hf` atau layout asli).
+const QWEN_FILES: [&str; 3] = ["config.json", "model.safetensors", "tokenizer.json"];
+
+fn load_qwen(dir: &Path) -> Result<(qwen3_asr::AsrInference, String), String> {
+    if !dir.is_dir() {
+        return Err(format!(
+            "Folder model Qwen3-ASR tidak ditemukan: {}",
+            dir.display()
+        ));
+    }
+    if let Some(missing) = QWEN_FILES.iter().find(|f| !dir.join(f).is_file()) {
+        return Err(format!(
+            "Folder Qwen3-ASR tidak lengkap: {missing} tidak ada di {}.",
+            dir.display()
+        ));
+    }
+    #[cfg(feature = "qwen-cuda")]
+    let cpu_note = match std::panic::catch_unwind(|| load_qwen_cuda(dir)) {
+        Ok(Ok(model)) => return Ok((model, "GPU CUDA0".into())),
+        Ok(Err(e)) => format!("CPU · CUDA gagal: {}", short_error(&e)),
+        // cudarc panik bila DLL NVRTC/cuRAND/cuBLAS tidak ditemukan.
+        Err(_) => "CPU · runtime CUDA tidak lengkap".into(),
+    };
+    #[cfg(not(feature = "qwen-cuda"))]
+    let cpu_note = "CPU".to_owned();
+    let model = qwen3_asr::AsrInference::load(dir, candle_core::Device::Cpu)
+        .map_err(|e| format!("Model Qwen3-ASR gagal dimuat ({e:#})."))?;
+    Ok((model, cpu_note))
+}
+
+/// Muat di GPU lalu jalankan satu inferensi pendek. Kernel candle di-JIT dari PTX saat pertama
+/// dipakai; driver yang lebih lama dari toolkit build menolaknya, jadi diuji di sini (sekaligus
+/// pemanasan) agar pemanggil bisa jatuh ke CPU.
+#[cfg(feature = "qwen-cuda")]
+fn load_qwen_cuda(dir: &Path) -> Result<qwen3_asr::AsrInference, String> {
+    let device = candle_core::Device::new_cuda(0).map_err(|e| e.to_string())?;
+    let model = qwen3_asr::AsrInference::load(dir, device).map_err(|e| format!("{e:#}"))?;
+    let warmup = qwen3_asr::TranscribeOptions::default().with_max_new_tokens(1);
+    model
+        .transcribe_samples(&vec![0.0; MIN_ASR], warmup)
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(model)
+}
+
+/// Potong pesan error panjang (mis. dari driver CUDA) untuk badge.
+#[cfg_attr(not(feature = "qwen-cuda"), allow(dead_code))]
+fn short_error(e: &str) -> String {
+    let e = e.rsplit_once("DriverError(").map_or(e, |(_, r)| r);
+    let e: String = e.chars().take(48).collect();
+    e.split([',', '(']).next().unwrap_or(&e).trim().to_owned()
 }
 
 /// Rentang dari ucapan pertama sampai terakhir (jeda di tengah dipertahankan), plus padding.
@@ -222,6 +301,30 @@ fn transcribe(
         audio.resize(MIN_ASR, 0.0);
     }
 
+    let started = Instant::now();
+    let result = match &mut m.asr {
+        Asr::Whisper(w) => run_whisper(w, session, &audio, language, threads, cancelled),
+        Asr::Qwen(q) => run_qwen(q, session, &audio, language, cancelled),
+    };
+    timing.asr = started.elapsed();
+    if is_cancelled() {
+        return (Outcome::Cancelled, timing);
+    }
+    match result {
+        Err(e) => (Outcome::Failed(format!("Transkripsi gagal: {e}")), timing),
+        Ok(text) if text.is_empty() => (Outcome::NoSpeech, timing),
+        Ok(text) => (Outcome::Text(text), timing),
+    }
+}
+
+fn run_whisper(
+    w: &mut WhisperAsr,
+    session: u64,
+    audio: &[f32],
+    language: Language,
+    threads: i32,
+    cancelled: &Arc<AtomicU64>,
+) -> Result<String, String> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
     params.set_n_threads(threads);
     params.set_language(language.code());
@@ -245,28 +348,43 @@ fn transcribe(
         params.set_abort_callback_user_data(&abort as *const AbortData as *mut c_void);
     }
 
-    let started = Instant::now();
-    let result = m.state.full(params, &audio);
+    let result = w.state.full(params, audio);
     drop(abort);
-    timing.asr = started.elapsed();
-    if is_cancelled() {
-        return (Outcome::Cancelled, timing);
-    }
-    if let Err(e) = result {
-        return (Outcome::Failed(format!("Transkripsi gagal: {e}")), timing);
-    }
+    result.map_err(|e| e.to_string())?;
     // Segmen yang menurut model kemungkinan besar bukan ucapan dibuang; ini menahan halusinasi
     // umum Whisper (mis. "Terima kasih.") pada noise singkat yang lolos VAD.
-    let text = join_segments(m.state.as_iter().filter_map(|s| {
+    Ok(join_segments(w.state.as_iter().filter_map(|s| {
         (s.no_speech_probability() < NO_SPEECH_MAX)
             .then(|| s.to_str_lossy().ok().map(|t| t.into_owned()))
             .flatten()
-    }));
-    if text.is_empty() {
-        (Outcome::NoSpeech, timing)
-    } else {
-        (Outcome::Text(text), timing)
+    })))
+}
+
+fn run_qwen(
+    q: &qwen3_asr::AsrInference,
+    session: u64,
+    audio: &[f32],
+    language: Language,
+    cancelled: &Arc<AtomicU64>,
+) -> Result<String, String> {
+    let flag = cancelled.clone();
+    let mut options = qwen3_asr::TranscribeOptions::default()
+        .with_max_new_tokens(QWEN_MAX_TOKENS)
+        .with_abort(move || flag.load(Ordering::SeqCst) >= session);
+    if let Some(name) = language.qwen_name() {
+        options = options.with_language(name);
     }
+    let result = q
+        .transcribe_samples(audio, options)
+        .map_err(|e| format!("{e:#}"))?;
+    Ok(clean_qwen_text(&result.text))
+}
+
+/// Buang sisa penanda format Qwen3-ASR (`language X<asr_text>`) bila tokenizer tidak
+/// menganggapnya token spesial, lalu rapikan whitespace.
+pub fn clean_qwen_text(raw: &str) -> String {
+    let text = raw.rsplit_once("<asr_text>").map_or(raw, |(_, t)| t);
+    join_segments([text.to_owned()])
 }
 
 struct AbortData {
@@ -380,18 +498,70 @@ mod tests {
         assert!(backend_summary(&[]).starts_with("CPU"));
     }
 
+    #[test]
+    fn short_error_keeps_driver_code() {
+        let e =
+            "Inference failed: DriverError(CUDA_ERROR_UNSUPPORTED_PTX_VERSION, \"the provided\")";
+        assert_eq!(short_error(e), "CUDA_ERROR_UNSUPPORTED_PTX_VERSION");
+        assert_eq!(short_error("no device"), "no device");
+    }
+
+    #[test]
+    fn qwen_text_drops_format_prefix() {
+        assert_eq!(clean_qwen_text("  Halo   dunia. "), "Halo dunia.");
+        assert_eq!(
+            clean_qwen_text("language Indonesian<asr_text>Halo dunia."),
+            "Halo dunia."
+        );
+        assert_eq!(clean_qwen_text("<asr_text> Apa kabar?"), "Apa kabar?");
+        assert_eq!(clean_qwen_text("<asr_text>"), "");
+    }
+
     /// Uji model nyata: `cargo test --release -- --ignored fixture` (butuh models/ dan fixtures/).
     #[test]
     #[ignore]
     fn fixture_transcription() {
+        run_fixture(Engine::Whisper);
+    }
+
+    /// Butuh `models/Qwen3-ASR-0.6B-hf/` (lihat README).
+    #[test]
+    #[ignore]
+    fn fixture_transcription_qwen() {
+        run_fixture(Engine::Qwen3Asr);
+    }
+
+    /// Butuh `models/Qwen3-ASR-1.7B-hf/` (lihat README).
+    #[test]
+    #[ignore]
+    fn fixture_transcription_qwen17() {
+        run_fixture(Engine::Qwen3Asr17);
+    }
+
+    fn fixture_samples(root: &Path, name: &str) -> Vec<f32> {
+        let bytes = std::fs::read(root.join("fixtures/fleurs-id").join(name)).unwrap();
+        // Fixture terverifikasi: PCM16 mono 16 kHz dengan header 44 byte.
+        bytes[44..]
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
+            .collect()
+    }
+
+    fn run_fixture(engine: Engine) {
         let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+        let models = root.join("models");
         let (tx, rx) = mpsc::channel();
         let worker = Worker::spawn(move |e| {
             let _ = tx.send(e);
         });
         worker.send(Job::Load {
-            asr: root.join("models").join(crate::config::ASR_FILE),
-            vad: root.join("models").join(crate::config::VAD_FILE),
+            engine,
+            asr: models.join(engine.default_name()),
+            vad: models
+                .join(crate::config::VAD_DIR)
+                .join(crate::config::VAD_FILE),
         });
         match rx.recv().unwrap() {
             Event::Loaded { backend, took, .. } => eprintln!("backend={backend} load={took:?}"),
@@ -412,17 +582,9 @@ mod tests {
             .iter()
             .enumerate()
         {
-            let bytes = std::fs::read(root.join("fixtures/fleurs-id").join(name)).unwrap();
-            // Fixture terverifikasi: PCM16 mono 16 kHz dengan header 44 byte.
-            let samples: Vec<f32> = bytes[44..]
-                .as_chunks::<2>()
-                .0
-                .iter()
-                .map(|b| i16::from_le_bytes(*b) as f32 / 32768.0)
-                .collect();
             worker.send(Job::Transcribe {
                 session: 2 + i as u64,
-                samples,
+                samples: fixture_samples(root, name),
                 language: Language::Indonesian,
             });
             let Event::Finished {
@@ -443,6 +605,38 @@ mod tests {
             );
             eprintln!("  {text}");
         }
+        // Deteksi bahasa otomatis juga harus menghasilkan teks bersih (tanpa prefiks bahasa).
+        worker.send(Job::Transcribe {
+            session: 8,
+            samples: fixture_samples(root, "id_id_0001.wav"),
+            language: Language::Auto,
+        });
+        let Event::Finished { outcome, .. } = rx.recv().unwrap() else {
+            panic!()
+        };
+        eprintln!("auto: {outcome:?}");
+        let Outcome::Text(text) = outcome else {
+            panic!("{outcome:?}")
+        };
+        assert!(!text.contains("language") && !text.contains("<asr_text>"));
+        // Pembatalan saat proses berjalan harus berakhir dengan Cancelled.
+        let long: Vec<f32> = ["id_id_0000.wav", "id_id_0001.wav", "id_id_0002.wav"]
+            .iter()
+            .flat_map(|n| fixture_samples(root, n))
+            .collect();
+        worker.send(Job::Transcribe {
+            session: 9,
+            samples: long,
+            language: Language::Indonesian,
+        });
+        thread::sleep(Duration::from_millis(100));
+        let cancelled_at = Instant::now();
+        worker.cancel(9);
+        let Event::Finished { outcome, .. } = rx.recv().unwrap() else {
+            panic!()
+        };
+        eprintln!("cancel: {outcome:?} setelah {:?}", cancelled_at.elapsed());
+        assert_eq!(outcome, Outcome::Cancelled);
         // Noise pendek (klik 30 ms + desis) tidak boleh menghasilkan teks.
         let mut noise: Vec<f32> = (0..16_000 * 2)
             .map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.002)

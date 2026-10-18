@@ -1,7 +1,6 @@
 /target/
 /.local/
 /models/
-/fi-whisper.md
 /docs/model-test/
 /docs/ui-*.png
 /fixtures/**/*.wav

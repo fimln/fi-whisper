@@ -16,7 +16,8 @@ New-Item -ItemType Directory -Force $downloads, $target | Out-Null
 # Manifest resmi memuat path dan SHA-256 tiap arsip.
 $manifest = Invoke-RestMethod "$base/redistrib_$Release.json"
 # cuda_crt dan libnvvm terpisah dari cuda_nvcc sejak CUDA 13.
-foreach ($name in 'cuda_nvcc', 'cuda_crt', 'libnvvm', 'cuda_cudart', 'cuda_cccl', 'cuda_profiler_api', 'libcublas') {
+# cuda_nvrtc dan libcurand dibutuhkan candle (fitur `qwen-cuda`).
+foreach ($name in 'cuda_nvcc', 'cuda_crt', 'libnvvm', 'cuda_cudart', 'cuda_cccl', 'cuda_profiler_api', 'libcublas', 'cuda_nvrtc', 'libcurand') {
     if (!$manifest.PSObject.Properties[$name]) { continue }
     $entry = $manifest.$name.'windows-x86_64'
     $zip = Join-Path $downloads (Split-Path $entry.relative_path -Leaf)

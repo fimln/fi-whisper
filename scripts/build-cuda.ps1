@@ -1,5 +1,5 @@
 #requires -Version 7.0
-# Menjalankan cargo dengan fitur `cuda` memakai CUDA dari scripts/setup-cuda.ps1.
+# Menjalankan cargo dengan fitur `cuda` (Whisper) dan `qwen-cuda` (Qwen3-ASR) memakai CUDA dari scripts/setup-cuda.ps1.
 # Environment hanya berlaku untuk proses ini. Contoh:
 #   ./scripts/build-cuda.ps1 build --locked --release
 #   ./scripts/build-cuda.ps1 test --release '--' --ignored fixture --nocapture  (kutip '--' agar tidak dibuang PowerShell)
@@ -27,9 +27,14 @@ $env:LIBCLANG_PATH = if ($env:LIBCLANG_PATH) { $env:LIBCLANG_PATH } else { 'C:\P
 $env:CMAKE_GENERATOR = 'Ninja'
 $env:CMAKE_CUDA_COMPILER = (Join-Path $cuda 'bin\nvcc.exe') -replace '\\', '/'
 $env:CMAKE_CUDA_ARCHITECTURES = '120'
+# Arsitektur kernel candle (fitur `qwen-cuda`), disamakan dengan whisper.cpp.
+$env:CUDA_COMPUTE_CAP = '120'
+# CCCL CUDA 13 menolak preprocessor tradisional MSVC; bindgen_cuda (candle) tidak menambahkan
+# flag ini sendiri. nvcc membaca NVCC_APPEND_FLAGS untuk setiap pemanggilan.
+$env:NVCC_APPEND_FLAGS = '-Xcompiler=/Zc:preprocessor'
 Set-Location $root
 # --features diletakkan sebelum argumen lain agar tidak jatuh setelah `--`.
-& cargo $CargoArgs[0] --features cuda @($CargoArgs | Select-Object -Skip 1)
+& cargo $CargoArgs[0] --features cuda,qwen-cuda @($CargoArgs | Select-Object -Skip 1)
 $code = $LASTEXITCODE
 if ($code -eq 0) {
     # Exe CUDA mengimpor cuBLAS secara dinamis; salin DLL ke samping exe agar bisa dijalankan langsung
@@ -37,7 +42,9 @@ if ($code -eq 0) {
     $buildProfile = if ($CargoArgs -contains '--release' -or $CargoArgs -contains '-r') { 'release' } else { 'debug' }
     $outDir = Join-Path $root "target\$buildProfile"
     if (Test-Path -LiteralPath $outDir) {
-        foreach ($dll in 'cublas64_13.dll', 'cublasLt64_13.dll') {
+        # candle (fitur `qwen-cuda`) memuat NVRTC dan cuRAND secara dinamis saat runtime.
+        $dlls = 'cublas64_13.dll', 'cublasLt64_13.dll', 'nvrtc64_130_0.dll', 'nvrtc-builtins64_132.dll', 'curand64_10.dll'
+        foreach ($dll in $dlls) {
             $src = Get-Item -LiteralPath (Join-Path $cuda "bin\x64\$dll")
             $dst = Join-Path $outDir $dll
             $old = Get-Item -LiteralPath $dst -ErrorAction SilentlyContinue

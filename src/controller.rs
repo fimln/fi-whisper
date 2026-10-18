@@ -1,7 +1,7 @@
 //! Koordinasi state di thread sendiri agar hotkey/tray tetap diproses saat jendela tersembunyi.
 
 use crate::audio::{self, Capture, CaptureEnd};
-use crate::config::Language;
+use crate::config::{Engine, Language};
 use crate::transcribe::{self, Job, Outcome, Timing, Worker};
 use crate::windows::{self, Inserted, Target};
 use std::path::PathBuf;
@@ -58,7 +58,8 @@ pub struct Status {
     pub result_note: String,
     pub backend: String,
     pub diagnostics: Vec<String>,
-    pub loaded: Option<(PathBuf, PathBuf)>,
+    /// Mesin, model ASR (file Whisper atau folder Qwen), dan model VAD yang aktif.
+    pub loaded: Option<(Engine, PathBuf, PathBuf)>,
     pub load_time: Option<Duration>,
     pub timing: Option<(Timing, Duration)>,
 }
@@ -67,6 +68,7 @@ pub enum Cmd {
     Toggle(Source),
     Cancel,
     Load {
+        engine: Engine,
         asr: PathBuf,
         vad: PathBuf,
     },
@@ -184,7 +186,7 @@ impl Controller {
         match cmd {
             Cmd::Toggle(source) => self.toggle(source),
             Cmd::Cancel => self.cancel(),
-            Cmd::Load { asr, vad } => {
+            Cmd::Load { engine, asr, vad } => {
                 let mut st = self.st();
                 if st.phase.busy() {
                     st.note = "Model hanya dapat diganti saat idle.".into();
@@ -194,7 +196,7 @@ impl Controller {
                 st.error.clear();
                 st.note.clear();
                 drop(st);
-                self.worker.send(Job::Load { asr, vad });
+                self.worker.send(Job::Load { engine, asr, vad });
             }
             Cmd::Settings { mic, language } => {
                 self.mic = mic;
@@ -386,6 +388,7 @@ impl Controller {
     fn worker_event(&mut self, event: transcribe::Event) {
         match event {
             transcribe::Event::Loaded {
+                engine,
                 asr,
                 vad,
                 backend,
@@ -396,7 +399,7 @@ impl Controller {
                 st.phase = Phase::Ready;
                 st.backend = backend;
                 st.diagnostics = diagnostics;
-                st.loaded = Some((asr, vad));
+                st.loaded = Some((engine, asr, vad));
                 st.load_time = Some(took);
                 st.error.clear();
                 st.note.clear();

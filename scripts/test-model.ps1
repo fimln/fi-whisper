@@ -57,8 +57,8 @@ function Get-VerifiedFile([string]$Url, [string]$Path, [string]$Hash) {
     Assert-Hash $Path $Hash
 }
 
-$asr = Join-Path $ModelDirectory 'ggml-large-v3-turbo.bin'
-$vad = Join-Path $ModelDirectory 'ggml-silero-v6.2.0.bin'
+$asr = Join-Path $ModelDirectory 'whisper-large-v3-turbo\ggml-large-v3-turbo.bin'
+$vad = Join-Path $ModelDirectory 'silero-vad-v6.2.0\ggml-silero-v6.2.0.bin'
 Assert-Hash $asr '1fc70f774d38eb169993ac391eea357ef47c88757ef72ee5943879b7e8e2bc69'
 Assert-Hash $vad '2aa269b785eeb53a82983a20501ddf7c1d9c48e33ab63a41391ac6c9f7fb6987'
 
