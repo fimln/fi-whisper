@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/status-early%20alpha-D4A72C?style=flat-square&labelColor=555555" alt="Status early alpha">
 </p>
 
-Aplikasi Automatic Speech Recognition (ASR) atau dikte, berjalan secara lokal tanpa internet untuk Windows, dibuat dengan Rust dan egui. Tanpa koneksi jaringan dan telemetri apapun.
+<p align="center">Aplikasi Automatic Speech Recognition (ASR) atau dikte, berjalan secara lokal tanpa internet untuk Windows, dibuat dengan Rust dan egui. Tanpa koneksi jaringan dan telemetri apapun.</p>
 
 <p align="center"><img src="assets/screenshot.png" width="620" alt="Jendela fi-whisper: kartu Dikte, Hasil terakhir, Pengaturan, dan Model"></p>
 
@@ -22,7 +22,7 @@ Aplikasi Automatic Speech Recognition (ASR) atau dikte, berjalan secara lokal ta
 | Qwen3-ASR 1.7B | `Qwen3-ASR-1.7B-hf\` (tiga file yang sama) | [Qwen3-ASR-1.7B-hf @ bcd2b5b](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf/tree/bcd2b5b7f32b480ab5790554cfa8347f246a14f3) | ~4 GB VRAM / ~8 GB RAM |
 | Silero VAD (wajib) | `silero-vad-v6.2.0\ggml-silero-v6.2.0.bin` | [whisper-vad](https://huggingface.co/ggml-org/whisper-vad/resolve/9ffd54a1e1ee413ddf265af9913beaf518d1639b/ggml-silero-v6.2.0.bin?download=true) | <1 MB |
 
-Pada GPU RTX 5060 Laptop dengan CUDA, ketiga model memproses audio selama 8-9 detik dalam 0,3-0,6 detik. Qwen3-ASR 1.7B memberi tanda baca dan kapitalisasi paling rapi untuk bahasa Indonesia. Rincian tes ada di [uji model](docs/MODEL-TEST.md).
+Pada GPU RTX 5060 Laptop dengan CUDA, ketiga model memproses audio selama 8-9 detik dalam 0,3-0,6 detik. Qwen3-ASR 1.7B memberi tanda baca dan kapital paling rapi untuk bahasa Indonesia. Rincian tes ada di [uji model](docs/MODEL-TEST.md).
 
 ## Arsitektur
 
@@ -42,8 +42,6 @@ flowchart LR
 ## Pemakaian
 
 Tekan shortcut untuk menjalankan deteksi ucapan, ngomong, terus tekan shortcut lagi untuk berhenti deteksi. Teks akan dimasukkan otomatis ke program yang dituju. File settings (mesin, model, mikrofon, bahasa, shortcut) tersimpan di `%LOCALAPPDATA%\fi-whisper\config.json`, dan file tidak ditimpa sampai memilih opsi Reset. Rekaman berhenti otomatis setelah 2 menit, dan hasil hanya tersimpan di RAM. Tombol close bisa menyembunyikan ke tray atau keluar dari aplikasi, ada pengaturannya.
-
-Teks tidak dimasukkan bila jendela tujuan berubah, tertutup, atau modifier masih ditekan, dan hasilnya tetap bisa disalin. Aplikasi yang berjalan sebagai administrator tidak menerima input, dan tidak ada deteksi field password. Lihat juga [validasi](docs/VALIDATION.md) dan [atribusi](docs/CREDITS.md). Kode berlisensi [MIT](LICENSE); font, ikon, dan model mengikuti lisensinya masing-masing.
 
 ## Build
 
