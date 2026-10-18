@@ -81,7 +81,11 @@ pub enum Cmd {
         session: u64,
         end: CaptureEnd,
     },
-    Worker(transcribe::Event),
+    Worker {
+        /// Generasi worker pengirim; event dari worker lama diabaikan.
+        worker: u64,
+        event: transcribe::Event,
+    },
     Inserted {
         session: u64,
         outcome: Inserted,
@@ -106,42 +110,10 @@ impl Handle {
 
 pub fn spawn(repaint: impl Fn() + Send + 'static) -> Handle {
     let (tx, rx) = mpsc::channel();
-    let status = Arc::new(Mutex::new(Status {
-        phase: Phase::MissingModel,
-        error: String::new(),
-        note: String::new(),
-        recording_since: None,
-        captured: Duration::ZERO,
-        level: None,
-        result: String::new(),
-        result_note: String::new(),
-        backend: "Belum diinisialisasi".into(),
-        diagnostics: Vec::new(),
-        loaded: None,
-        load_time: None,
-        timing: None,
-    }));
+    let mut controller = Controller::new(tx.clone());
     let handle = Handle {
-        tx: tx.clone(),
-        status: status.clone(),
-    };
-    let worker_tx = tx.clone();
-    let worker = Worker::spawn(move |e| {
-        let _ = worker_tx.send(Cmd::Worker(e));
-    });
-    let mut controller = Controller {
         tx,
-        status,
-        worker,
-        mic: None,
-        language: Language::Indonesian,
-        session: 0,
-        capture: None,
-        target: None,
-        stopped_at: None,
-        awaiting_capture: false,
-        injecting: false,
-        cancelling: false,
+        status: controller.status.clone(),
     };
     thread::Builder::new()
         .name("fi-whisper-controller".into())
@@ -150,10 +122,23 @@ pub fn spawn(repaint: impl Fn() + Send + 'static) -> Handle {
     handle
 }
 
+fn spawn_worker(tx: &Sender<Cmd>, generation: u64) -> Worker {
+    let tx = tx.clone();
+    Worker::spawn(move |event| {
+        let _ = tx.send(Cmd::Worker {
+            worker: generation,
+            event,
+        });
+    })
+}
+
+const NO_BACKEND: &str = "Belum diinisialisasi";
+
 struct Controller {
     tx: Sender<Cmd>,
     status: Arc<Mutex<Status>>,
     worker: Worker,
+    worker_gen: u64,
     mic: Option<String>,
     language: Language,
     /// ID sesi aktif; hasil dengan ID lain diabaikan.
@@ -168,6 +153,39 @@ struct Controller {
 }
 
 impl Controller {
+    fn new(tx: Sender<Cmd>) -> Self {
+        let status = Arc::new(Mutex::new(Status {
+            phase: Phase::MissingModel,
+            error: String::new(),
+            note: String::new(),
+            recording_since: None,
+            captured: Duration::ZERO,
+            level: None,
+            result: String::new(),
+            result_note: String::new(),
+            backend: NO_BACKEND.into(),
+            diagnostics: Vec::new(),
+            loaded: None,
+            load_time: None,
+            timing: None,
+        }));
+        Self {
+            worker: spawn_worker(&tx, 0),
+            worker_gen: 0,
+            tx,
+            status,
+            mic: None,
+            language: Language::Indonesian,
+            session: 0,
+            capture: None,
+            target: None,
+            stopped_at: None,
+            awaiting_capture: false,
+            injecting: false,
+            cancelling: false,
+        }
+    }
+
     fn run(&mut self, rx: Receiver<Cmd>, repaint: impl Fn()) {
         while let Ok(cmd) = rx.recv() {
             self.handle(cmd);
@@ -196,7 +214,7 @@ impl Controller {
                 st.error.clear();
                 st.note.clear();
                 drop(st);
-                self.worker.send(Job::Load { engine, asr, vad });
+                self.send_job(Job::Load { engine, asr, vad });
             }
             Cmd::Settings { mic, language } => {
                 self.mic = mic;
@@ -208,7 +226,8 @@ impl Controller {
                 st.result_note.clear();
             }
             Cmd::Captured { session, end } => self.captured(session, end),
-            Cmd::Worker(event) => self.worker_event(event),
+            Cmd::Worker { worker, event } if worker == self.worker_gen => self.worker_event(event),
+            Cmd::Worker { .. } => {}
             Cmd::Inserted { session, outcome } => {
                 self.injecting = false;
                 if session != self.session {
@@ -366,7 +385,7 @@ impl Controller {
                     st.note = "Batas 2 menit tercapai; rekaman diproses.".into();
                 }
                 drop(st);
-                self.worker.send(Job::Transcribe {
+                self.send_job(Job::Transcribe {
                     session,
                     samples: rec.samples,
                     language: self.language,
@@ -385,8 +404,40 @@ impl Controller {
         }
     }
 
+    fn send_job(&mut self, job: Job) {
+        if self.worker.send(job).is_err() {
+            self.worker_lost("thread worker tidak aktif");
+        }
+    }
+
+    /// Worker mati: ganti dengan worker baru tanpa model dan keluar dari status sibuk.
+    fn worker_lost(&mut self, reason: &str) {
+        let reason: String = reason.chars().take(120).collect();
+        self.worker_gen += 1;
+        self.worker = spawn_worker(&self.tx, self.worker_gen);
+        self.session += 1; // hasil sesi yang sedang berjalan tidak akan datang
+        if let Some(c) = self.capture.take() {
+            c.cancel();
+        }
+        self.target = None;
+        self.stopped_at = None;
+        self.awaiting_capture = false;
+        self.cancelling = false;
+        let mut st = self.st();
+        st.phase = Phase::Error;
+        st.error = format!("Mesin ASR berhenti ({reason}). Muat ulang model di Pengaturan.");
+        st.note.clear();
+        st.recording_since = None;
+        st.level = None;
+        st.loaded = None;
+        st.backend = NO_BACKEND.into();
+        st.diagnostics.clear();
+        st.load_time = None;
+    }
+
     fn worker_event(&mut self, event: transcribe::Event) {
         match event {
+            transcribe::Event::Crashed(reason) => self.worker_lost(&reason),
             transcribe::Event::Loaded {
                 engine,
                 asr,
@@ -469,5 +520,101 @@ impl Controller {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::audio::Recording;
+
+    fn recv(rx: &Receiver<Cmd>) -> Cmd {
+        rx.recv_timeout(Duration::from_secs(5))
+            .expect("event worker")
+    }
+
+    fn load_cmd() -> Cmd {
+        Cmd::Load {
+            engine: Engine::Whisper,
+            asr: PathBuf::from("tidak-ada.bin"),
+            vad: PathBuf::from("tidak-ada-vad.bin"),
+        }
+    }
+
+    /// Bunuh worker aktif dan kembalikan event Crashed-nya tanpa diproses.
+    fn kill_worker(c: &Controller, rx: &Receiver<Cmd>) -> Cmd {
+        c.worker.send(Job::Panic).unwrap();
+        let cmd = recv(rx);
+        assert!(matches!(
+            cmd,
+            Cmd::Worker {
+                event: transcribe::Event::Crashed(_),
+                ..
+            }
+        ));
+        cmd
+    }
+
+    #[test]
+    fn crash_while_transcribing_leaves_busy_state() {
+        let (tx, rx) = mpsc::channel();
+        let mut c = Controller::new(tx);
+        {
+            let mut st = c.st();
+            st.phase = Phase::Transcribing;
+            st.loaded = Some((Engine::Whisper, "a".into(), "b".into()));
+        }
+        c.session = 3;
+        c.stopped_at = Some(Instant::now());
+        let crashed = kill_worker(&c, &rx);
+        c.handle(crashed);
+        {
+            let st = c.st();
+            assert_eq!(st.phase, Phase::Error);
+            assert!(st.loaded.is_none());
+            assert!(st.error.contains("uji panic worker"), "{}", st.error);
+        }
+        assert_eq!(c.worker_gen, 1);
+        assert!(c.session > 3 && c.stopped_at.is_none());
+
+        // Worker pengganti aktif: Load dijawab, bukan menggantung di Loading.
+        c.handle(load_cmd());
+        assert_eq!(c.st().phase, Phase::Loading);
+        c.handle(recv(&rx));
+        let st = c.st();
+        assert_eq!(st.phase, Phase::Error);
+        assert!(st.error.contains("VAD"), "{}", st.error);
+    }
+
+    #[test]
+    fn send_to_dead_worker_is_reported() {
+        let (tx, rx) = mpsc::channel();
+        let mut c = Controller::new(tx);
+        let stale = kill_worker(&c, &rx);
+
+        // Load sebelum event Crashed diproses: pengiriman gagal, status tidak tersangkut.
+        c.handle(load_cmd());
+        assert_eq!(c.st().phase, Phase::Error);
+        assert!(!c.st().phase.busy());
+        assert_eq!(c.worker_gen, 1);
+        // Event Crashed dari worker lama tidak memicu penggantian kedua.
+        c.handle(stale);
+        assert_eq!(c.worker_gen, 1);
+
+        // Hasil rekaman dikirim ke worker yang ternyata sudah mati.
+        let _ = kill_worker(&c, &rx);
+        c.st().phase = Phase::Transcribing;
+        c.awaiting_capture = true;
+        c.handle(Cmd::Captured {
+            session: c.session,
+            end: CaptureEnd::Done(Recording {
+                samples: vec![0.0; 16_000],
+                captured: Duration::from_secs(1),
+                hit_limit: false,
+            }),
+        });
+        assert_eq!(c.st().phase, Phase::Error);
+        assert!(!c.awaiting_capture);
+        assert_eq!(c.worker_gen, 2);
     }
 }

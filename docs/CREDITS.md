@@ -8,7 +8,7 @@
 - rfd 0.17.2: MIT, https://github.com/PolyMeilex/rfd.
 - whisper-rs 0.16.0 / whisper-rs-sys 0.15.0 (Unlicense, https://codeberg.org/tazz4843/whisper-rs), membundel whisper.cpp 1.8.3 dan ggml (MIT) yang ditautkan statis ke exe.
 - cpal 0.18.2 (Apache-2.0), rubato 5.0.1 (MIT), rtrb 0.4.0 (MIT OR Apache-2.0), global-hotkey 0.9.0 dan tray-icon 0.26.1 (MIT OR Apache-2.0), windows-sys 0.61.2 (MIT OR Apache-2.0), serde/serde_json (MIT OR Apache-2.0).
-- qwen3-asr 0.2.2 (MIT, https://github.com/alan890104/qwen3-asr-rs), disalin ke `vendor/qwen3-asr` dengan patch fi-whisper (layout checkpoint `*-hf` dan pembatalan); memakai candle 0.9.2 (MIT OR Apache-2.0) dan tokenizers 0.22 (Apache-2.0).
+- qwen3-asr 0.2.2 (MIT, https://github.com/alan890104/qwen3-asr-rs), disalin ke `vendor/qwen3-asr` dengan patch fi-whisper (layout checkpoint `*-hf`, pembatalan, dan validasi `config.json`); memakai candle 0.9.2 (MIT OR Apache-2.0) dan tokenizers 0.22 (Apache-2.0).
 - Bobot [Qwen/Qwen3-ASR-0.6B-hf](https://huggingface.co/Qwen/Qwen3-ASR-0.6B-hf) dan [Qwen/Qwen3-ASR-1.7B-hf](https://huggingface.co/Qwen/Qwen3-ASR-1.7B-hf): Alibaba Qwen, Apache-2.0. Tidak dibundel.
 - webbrowser 1.2.4 (MIT OR Apache-2.0), lewat fitur `links` eframe untuk membuka tautan header.
 

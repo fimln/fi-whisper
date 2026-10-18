@@ -2,6 +2,7 @@
 
 use crate::config::{Engine, Language};
 use std::ffi::{CStr, c_char, c_void};
+use std::panic::{self, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc;
@@ -31,7 +32,14 @@ pub enum Job {
         samples: Vec<f32>,
         language: Language,
     },
+    /// Mensimulasikan panic di thread worker.
+    #[cfg(test)]
+    Panic,
 }
+
+/// Job tidak terkirim karena thread worker sudah berhenti.
+#[derive(Debug)]
+pub struct WorkerGone;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Outcome {
@@ -63,6 +71,8 @@ pub enum Event {
         outcome: Outcome,
         timing: Timing,
     },
+    /// Thread worker panic dan berhenti; model ikut hilang.
+    Crashed(String),
 }
 
 pub struct Worker {
@@ -79,13 +89,19 @@ impl Worker {
         let flag = cancelled.clone();
         thread::Builder::new()
             .name("fi-whisper-asr".into())
-            .spawn(move || run(rx, flag, events))
+            .spawn(move || {
+                // `rx` ikut di-drop saat unwind, jadi `send` berikutnya langsung gagal.
+                let result = panic::catch_unwind(AssertUnwindSafe(|| run(rx, flag, &events)));
+                if let Err(payload) = result {
+                    events(Event::Crashed(panic_message(&*payload)));
+                }
+            })
             .expect("thread worker ASR");
         Self { jobs, cancelled }
     }
 
-    pub fn send(&self, job: Job) {
-        let _ = self.jobs.send(job);
+    pub fn send(&self, job: Job) -> Result<(), WorkerGone> {
+        self.jobs.send(job).map_err(|_| WorkerGone)
     }
 
     pub fn cancel(&self, session: u64) {
@@ -110,7 +126,15 @@ struct WhisperAsr {
     _ctx: WhisperContext,
 }
 
-fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: impl Fn(Event)) {
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
+    payload
+        .downcast_ref::<&str>()
+        .map(|s| (*s).to_owned())
+        .or_else(|| payload.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic tanpa pesan".into())
+}
+
+fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Event)) {
     let mut models: Option<Models> = None;
     let threads = thread::available_parallelism().map_or(4, |n| n.get().min(8)) as i32;
     while let Ok(job) = rx.recv() {
@@ -157,6 +181,8 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: impl Fn(Event
                     timing,
                 });
             }
+            #[cfg(test)]
+            Job::Panic => panic!("uji panic worker"),
         }
     }
 }
@@ -517,6 +543,26 @@ mod tests {
         assert_eq!(clean_qwen_text("<asr_text>"), "");
     }
 
+    #[test]
+    fn worker_panic_is_reported_and_closes_channel() {
+        let (tx, rx) = mpsc::channel();
+        let worker = Worker::spawn(move |e| {
+            let _ = tx.send(e);
+        });
+        worker.send(Job::Panic).unwrap();
+        let event = rx.recv_timeout(Duration::from_secs(5)).unwrap();
+        let Event::Crashed(msg) = event else {
+            panic!("bukan Crashed")
+        };
+        assert_eq!(msg, "uji panic worker");
+        let job = Job::Transcribe {
+            session: 1,
+            samples: Vec::new(),
+            language: Language::Indonesian,
+        };
+        assert!(worker.send(job).is_err());
+    }
+
     /// Uji model nyata: `cargo test --release -- --ignored fixture` (butuh models/ dan fixtures/).
     #[test]
     #[ignore]
@@ -556,24 +602,28 @@ mod tests {
         let worker = Worker::spawn(move |e| {
             let _ = tx.send(e);
         });
-        worker.send(Job::Load {
-            engine,
-            asr: models.join(engine.default_name()),
-            vad: models
-                .join(crate::config::VAD_DIR)
-                .join(crate::config::VAD_FILE),
-        });
+        worker
+            .send(Job::Load {
+                engine,
+                asr: models.join(engine.default_name()),
+                vad: models
+                    .join(crate::config::VAD_DIR)
+                    .join(crate::config::VAD_FILE),
+            })
+            .unwrap();
         match rx.recv().unwrap() {
             Event::Loaded { backend, took, .. } => eprintln!("backend={backend} load={took:?}"),
             Event::LoadFailed(e) => panic!("{e}"),
-            Event::Finished { .. } => unreachable!(),
+            Event::Finished { .. } | Event::Crashed(_) => unreachable!(),
         }
         let silence = vec![0.0; 16_000 * 3];
-        worker.send(Job::Transcribe {
-            session: 1,
-            samples: silence,
-            language: Language::Indonesian,
-        });
+        worker
+            .send(Job::Transcribe {
+                session: 1,
+                samples: silence,
+                language: Language::Indonesian,
+            })
+            .unwrap();
         let Event::Finished { outcome, .. } = rx.recv().unwrap() else {
             panic!()
         };
@@ -582,11 +632,13 @@ mod tests {
             .iter()
             .enumerate()
         {
-            worker.send(Job::Transcribe {
-                session: 2 + i as u64,
-                samples: fixture_samples(root, name),
-                language: Language::Indonesian,
-            });
+            worker
+                .send(Job::Transcribe {
+                    session: 2 + i as u64,
+                    samples: fixture_samples(root, name),
+                    language: Language::Indonesian,
+                })
+                .unwrap();
             let Event::Finished {
                 outcome, timing, ..
             } = rx.recv().unwrap()
@@ -606,11 +658,13 @@ mod tests {
             eprintln!("  {text}");
         }
         // Deteksi bahasa otomatis juga harus menghasilkan teks bersih (tanpa prefiks bahasa).
-        worker.send(Job::Transcribe {
-            session: 8,
-            samples: fixture_samples(root, "id_id_0001.wav"),
-            language: Language::Auto,
-        });
+        worker
+            .send(Job::Transcribe {
+                session: 8,
+                samples: fixture_samples(root, "id_id_0001.wav"),
+                language: Language::Auto,
+            })
+            .unwrap();
         let Event::Finished { outcome, .. } = rx.recv().unwrap() else {
             panic!()
         };
@@ -624,11 +678,13 @@ mod tests {
             .iter()
             .flat_map(|n| fixture_samples(root, n))
             .collect();
-        worker.send(Job::Transcribe {
-            session: 9,
-            samples: long,
-            language: Language::Indonesian,
-        });
+        worker
+            .send(Job::Transcribe {
+                session: 9,
+                samples: long,
+                language: Language::Indonesian,
+            })
+            .unwrap();
         thread::sleep(Duration::from_millis(100));
         let cancelled_at = Instant::now();
         worker.cancel(9);
@@ -642,11 +698,13 @@ mod tests {
             .map(|i| ((i * 7919 % 1000) as f32 / 1000.0 - 0.5) * 0.002)
             .collect();
         noise[16_000..16_480].iter_mut().for_each(|s| *s = 0.6);
-        worker.send(Job::Transcribe {
-            session: 10,
-            samples: noise,
-            language: Language::Indonesian,
-        });
+        worker
+            .send(Job::Transcribe {
+                session: 10,
+                samples: noise,
+                language: Language::Indonesian,
+            })
+            .unwrap();
         let Event::Finished { outcome, .. } = rx.recv().unwrap() else {
             panic!()
         };

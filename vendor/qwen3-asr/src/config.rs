@@ -115,6 +115,12 @@ impl AsrConfig {
     /// fi-whisper: accepts both the original `thinker_config` layout and the Transformers-native
     /// layout (`audio_config`/`text_config` at the top level, `rope_parameters`).
     pub fn from_json(content: &str) -> anyhow::Result<(Self, bool)> {
+        let (config, hf) = Self::parse_json(content)?;
+        config.validate()?;
+        Ok((config, hf))
+    }
+
+    fn parse_json(content: &str) -> anyhow::Result<(Self, bool)> {
         let mut value: serde_json::Value = serde_json::from_str(content)?;
         if value.get("thinker_config").is_some() {
             return Ok((serde_json::from_value(value)?, false));
@@ -142,6 +148,37 @@ impl AsrConfig {
         }
         let config = serde_json::json!({ "thinker_config": thinker });
         Ok((serde_json::from_value(config)?, true))
+    }
+
+    /// fi-whisper: rejects values that would otherwise divide by zero or index out of bounds in
+    /// the encoder/decoder (config.json comes from a user-chosen folder).
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let a = &self.thinker_config.audio_config;
+        let t = &self.thinker_config.text_config;
+        let check = |ok: bool, msg: &str| if ok { Ok(()) } else { Err(anyhow::anyhow!("invalid config.json: {msg}")) };
+        check(a.num_mel_bins > 0, "audio_config.num_mel_bins must be > 0")?;
+        check(
+            a.encoder_attention_heads > 0 && a.d_model % a.encoder_attention_heads == 0,
+            "audio_config.d_model must be a positive multiple of encoder_attention_heads",
+        )?;
+        let chunk = a.n_window.checked_mul(2).filter(|&c| c > 0);
+        check(
+            chunk.is_some_and(|c| a.n_window_infer >= c),
+            "audio_config.n_window must be > 0 and n_window_infer >= 2 * n_window",
+        )?;
+        check(t.num_hidden_layers > 0, "text_config.num_hidden_layers must be > 0")?;
+        check(
+            t.num_key_value_heads > 0
+                && t.num_attention_heads > 0
+                && t.num_attention_heads % t.num_key_value_heads == 0,
+            "text_config.num_attention_heads must be a positive multiple of num_key_value_heads",
+        )?;
+        check(t.head_dim > 0 && t.head_dim % 2 == 0, "text_config.head_dim must be even and > 0")?;
+        let section = t.mrope_section();
+        check(
+            section.len() == 3 && section.iter().try_fold(0usize, |s, &x| s.checked_add(x)) == Some(t.head_dim / 2),
+            "rope_scaling.mrope_section must have 3 entries summing to head_dim / 2",
+        )
     }
 }
 
@@ -259,6 +296,35 @@ mod tests {
         assert_eq!(r("model.multi_modal_projector.linear_2.weight"), "thinker.audio_tower.proj2.weight");
         assert_eq!(r("model.language_model.norm.weight"), "thinker.model.norm.weight");
         assert_eq!(r("thinker.model.norm.weight"), "thinker.model.norm.weight");
+    }
+
+    #[test]
+    fn invalid_divisors_are_rejected() {
+        let ok = r#"{"thinker_config": {"audio_config": {}, "text_config": {}}}"#;
+        assert!(AsrConfig::from_json(ok).is_ok());
+        for bad in [
+            r#"{"encoder_attention_heads": 0}"#,
+            r#"{"encoder_attention_heads": 5}"#,
+            r#"{"n_window": 0}"#,
+            r#"{"n_window_infer": 50}"#,
+            r#"{"num_mel_bins": 0}"#,
+        ] {
+            let json = format!(r#"{{"thinker_config": {{"audio_config": {bad}, "text_config": {{}}}}}}"#);
+            assert!(AsrConfig::from_json(&json).is_err(), "{bad}");
+        }
+        for bad in [
+            r#"{"num_key_value_heads": 0}"#,
+            r#"{"num_attention_heads": 12}"#,
+            r#"{"num_hidden_layers": 0}"#,
+            r#"{"head_dim": 0}"#,
+            r#"{"head_dim": 64}"#,
+            r#"{"rope_scaling": {"mrope_section": []}}"#,
+        ] {
+            let json = format!(r#"{{"thinker_config": {{"audio_config": {{}}, "text_config": {bad}}}}}"#);
+            assert!(AsrConfig::from_json(&json).is_err(), "{bad}");
+        }
+        let hf = r#"{"model_type": "qwen3_asr", "audio_config": {"n_window": 0}, "text_config": {}}"#;
+        assert!(AsrConfig::from_json(hf).is_err());
     }
 
     #[test]
