@@ -703,7 +703,12 @@ impl App {
                     // Harus sebelum isi: set_min_height di egui dihitung dari kursor saat ini.
                     ui.set_min_height(target);
                     // Tinggi scope = tinggi isi saja, tidak terpengaruh set_min_height.
-                    heights[col] = ui.scope(|ui| add(self, ui)).response.rect.height();
+                    // Kolom egui memakai layout justified; tanpa ini teks label ikut rata kanan-kiri.
+                    heights[col] = ui
+                        .with_layout(Layout::top_down(Align::Min), |ui| add(self, ui))
+                        .response
+                        .rect
+                        .height();
                 });
             }
         });
