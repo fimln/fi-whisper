@@ -4,6 +4,88 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
+const ANIM: f32 = 0.12;
+
+fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+    egui::lerp(egui::Rgba::from(a)..=egui::Rgba::from(b), t).into()
+}
+
+fn motion(ui: &Ui, response: &Response, enabled: bool) -> (f32, f32) {
+    let enabled = enabled && response.enabled();
+    (
+        ui.ctx().animate_bool_with_time(
+            response.id.with("hover"),
+            enabled && response.hovered(),
+            ANIM,
+        ),
+        ui.ctx().animate_bool_with_time(
+            response.id.with("press"),
+            enabled && (response.is_pointer_button_down_on() || response.clicked()),
+            0.07,
+        ),
+    )
+}
+
+/// Widget bawaan digambar sebelum respons tersedia, jadi pakai interaksi frame sebelumnya.
+pub fn interactive(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Response {
+    let id = ui.next_auto_id().with("interaction");
+    let previous = ui
+        .ctx()
+        .data(|d| d.get_temp::<(bool, bool)>(id))
+        .unwrap_or_default();
+    let hover =
+        ui.ctx()
+            .animate_bool_with_time(id.with("hover"), previous.0 && ui.is_enabled(), ANIM);
+    let press =
+        ui.ctx()
+            .animate_bool_with_time(id.with("press"), previous.1 && ui.is_enabled(), 0.07);
+    let response = ui
+        .scope(|ui| {
+            let w = &mut ui.visuals_mut().widgets;
+            let rest = w.inactive;
+            let fill = mix(
+                mix(rest.bg_fill, w.hovered.bg_fill, hover),
+                w.active.bg_fill,
+                press,
+            );
+            let weak = mix(
+                mix(rest.weak_bg_fill, w.hovered.weak_bg_fill, hover),
+                w.active.weak_bg_fill,
+                press,
+            );
+            let border = mix(rest.bg_stroke.color, w.hovered.bg_stroke.color, hover);
+            for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
+                state.bg_fill = fill;
+                state.weak_bg_fill = weak;
+                state.bg_stroke.color = border;
+                state.expansion = hover - press;
+            }
+            add(ui)
+        })
+        .inner;
+    let current = (
+        response.enabled() && response.hovered(),
+        response.enabled() && (response.is_pointer_button_down_on() || response.clicked()),
+    );
+    ui.ctx().data_mut(|d| d.insert_temp(id, current));
+    if current != previous {
+        ui.ctx().request_repaint();
+    }
+    response
+}
+
+pub fn combo(ui: &mut Ui, combo: egui::ComboBox, add: impl FnOnce(&mut Ui)) -> Response {
+    let style = ui.style().clone();
+    interactive(ui, |ui| {
+        combo
+            .show_ui(ui, |ui| {
+                ui.set_style(style);
+                add(ui);
+            })
+            .response
+    })
+}
+
 // Fondasi
 pub const BG: Color32 = Color32::from_rgb(0x0F, 0x0E, 0x0C);
 pub const SURFACE: Color32 = Color32::from_rgb(0x18, 0x16, 0x13);
@@ -54,10 +136,14 @@ pub fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
 const ICON_SIZE: usize = 64;
 const GITHUB_RGBA: &[u8] = include_bytes!("../assets/icons/mark-github-24-64.rgba");
 const HOME_RGBA: &[u8] = include_bytes!("../assets/icons/home-fill-24-64.rgba");
+const MINIMIZE_RGBA: &[u8] = include_bytes!("../assets/icons/dash-24-64.rgba");
+const CLOSE_RGBA: &[u8] = include_bytes!("../assets/icons/x-24-64.rgba");
 
 pub struct Icons {
     pub github: egui::TextureHandle,
     pub home: egui::TextureHandle,
+    pub minimize: egui::TextureHandle,
+    pub close: egui::TextureHandle,
 }
 
 impl Icons {
@@ -72,11 +158,39 @@ impl Icons {
         Self {
             github: load("icon-github", GITHUB_RGBA),
             home: load("icon-home", HOME_RGBA),
+            minimize: load("icon-minimize", MINIMIZE_RGBA),
+            close: load("icon-close", CLOSE_RGBA),
         }
     }
 }
 
-/// Pil tautan dengan gaya `badge`: ikon (dan teks opsional), membuka `url` di browser.
+/// Pil berbentuk `badge` yang bisa diklik: ikon (dan teks opsional) dengan warna `color`.
+fn pill(ui: &mut Ui, icon: &egui::TextureHandle, text: Option<&str>, color: Color32) -> Response {
+    let mut frame = Frame::new()
+        .fill(color.gamma_multiply(0.14))
+        .corner_radius(99)
+        .inner_margin(Margin::symmetric(10, 4))
+        .begin(ui);
+    {
+        let ui = &mut frame.content_ui;
+        ui.spacing_mut().item_spacing.x = 6.0;
+        // Induknya right_to_left (header): teks ditambahkan dulu agar ikon tampil di kiri.
+        if let Some(text) = text {
+            ui.label(RichText::new(text).font(medium(12.0)).color(color));
+        }
+        ui.add(egui::Image::new((icon.id(), vec2(14.0, 14.0))).tint(color));
+    }
+    let response = frame
+        .allocate_space(ui)
+        .interact(Sense::click())
+        .on_hover_cursor(egui::CursorIcon::PointingHand);
+    let (hover, press) = motion(ui, &response, true);
+    frame.frame.fill = color.gamma_multiply(0.14 + 0.10 * hover + 0.08 * press);
+    frame.paint(ui);
+    response
+}
+
+/// Pil tautan: membuka `url` di browser.
 pub fn link_badge(
     ui: &mut Ui,
     icon: &egui::TextureHandle,
@@ -84,26 +198,18 @@ pub fn link_badge(
     color: Color32,
     url: &str,
 ) {
-    let response = Frame::new()
-        .fill(color.gamma_multiply(0.14))
-        .corner_radius(99)
-        .inner_margin(Margin::symmetric(10, 4))
-        .show(ui, |ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
-            // Induknya right_to_left (header): teks ditambahkan dulu agar ikon tampil di kiri.
-            if let Some(text) = text {
-                ui.label(RichText::new(text).font(medium(12.0)).color(color));
-            }
-            ui.add(egui::Image::new((icon.id(), vec2(14.0, 14.0))).tint(color));
-        })
-        .response
-        .interact(Sense::click())
-        .on_hover_cursor(egui::CursorIcon::PointingHand)
-        .on_hover_text(url);
+    let response = pill(ui, icon, text, color).on_hover_text(url);
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Link, true, url));
     if response.clicked() {
         ui.ctx().open_url(egui::OpenUrl::new_tab(url));
     }
+}
+
+/// Pil kontrol jendela (minimize/close) dengan gaya yang sama seperti `link_badge`.
+pub fn window_badge(ui: &mut Ui, icon: &egui::TextureHandle, color: Color32, label: &str) -> bool {
+    let response = pill(ui, icon, None, color).on_hover_text(label);
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    response.clicked()
 }
 
 pub fn semibold(size: f32) -> FontId {
@@ -267,19 +373,21 @@ pub fn primary(ui: &mut Ui, enabled: bool, glow: bool, text: &str) -> Response {
         Sense::hover()
     };
     let (rect, response) = ui.allocate_exact_size(size, sense);
+    let (hover, press) = motion(ui, &response, enabled);
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let (fill, fg) = if !enabled {
             (RAISED, MUTED)
-        } else if response.is_pointer_button_down_on() {
-            (ACCENT, ON_ACCENT)
-        } else if response.hovered() {
-            (ACCENT_HOVER, ON_ACCENT)
         } else {
-            (ACCENT, ON_ACCENT)
+            (mix(ACCENT, ACCENT_HOVER, hover * (1.0 - press)), ON_ACCENT)
         };
-        if enabled && (glow || response.hovered()) {
-            painter.rect_filled(rect.expand(5.0), 15.0, ACCENT_TINT);
+        let rect = rect.shrink(press);
+        if enabled {
+            painter.rect_filled(
+                rect.expand(5.0),
+                15.0,
+                ACCENT_TINT.gamma_multiply(if glow { 1.0 } else { hover }),
+            );
         }
         painter.rect_filled(rect, 10.0, fill);
         if !enabled {
@@ -299,9 +407,75 @@ pub fn primary(ui: &mut Ui, enabled: bool, glow: bool, text: &str) -> Response {
 
 /// Tombol sekunder dengan ukuran yang sejajar dengan tombol utama.
 pub fn secondary(ui: &mut Ui, enabled: bool, text: &str) -> Response {
-    ui.add_enabled(
-        enabled,
-        egui::Button::new(RichText::new(text).color(if enabled { TEXT } else { MUTED }))
-            .min_size(vec2(0.0, 34.0)),
-    )
+    interactive(ui, |ui| {
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(RichText::new(text).color(if enabled { TEXT } else { MUTED }))
+                .min_size(vec2(0.0, 34.0)),
+        )
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hover_and_press_animate_without_moving_layout_and_disabled_stays_inert() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut time = 0.0;
+        let mut frame = |events, enabled| {
+            time += 1.0 / 60.0;
+            let mut sample = (egui::Rect::NOTHING, RAISED, false);
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    ui.add_enabled_ui(enabled, |ui| {
+                        let response = interactive(ui, |ui| {
+                            sample.1 = ui.visuals().widgets.inactive.bg_fill;
+                            ui.button("Uji")
+                        });
+                        sample.0 = response.rect;
+                        sample.2 = response.clicked();
+                    });
+                },
+            );
+            sample
+        };
+        let rest = frame(vec![], true);
+        let pos = rest.0.center();
+        frame(vec![egui::Event::PointerMoved(pos)], true);
+        let mut samples = Vec::new();
+        for _ in 0..12 {
+            let sample = frame(vec![], true);
+            assert_eq!(sample.0, rest.0);
+            samples.push(sample.1);
+        }
+        assert!(samples.iter().any(|c| *c != RAISED && *c != BORDER));
+        assert_eq!(*samples.last().unwrap(), BORDER);
+        let button = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::default(),
+        };
+        frame(vec![button(true)], true);
+        for _ in 0..8 {
+            frame(vec![], true);
+        }
+        let pressed = frame(vec![], true);
+        assert_eq!(pressed.0, rest.0);
+        assert_ne!(pressed.1, BORDER);
+        assert!(frame(vec![button(false)], true).2);
+        for _ in 0..12 {
+            frame(vec![], false);
+        }
+        assert_eq!(frame(vec![], false).1, RAISED);
+        assert!(!frame(vec![button(true), button(false)], false).2);
+    }
 }

@@ -22,6 +22,7 @@ const NO_SPEECH_MAX: f32 = 0.6; // sama dengan no_speech_thold bawaan Whisper
 const QWEN_MAX_TOKENS: usize = 1024;
 
 pub enum Job {
+    Shutdown,
     Load {
         engine: Engine,
         asr: PathBuf,
@@ -79,6 +80,7 @@ pub struct Worker {
     jobs: mpsc::Sender<Job>,
     /// Sesi dengan ID <= nilai ini dibatalkan; dibaca abort callback whisper.cpp.
     cancelled: Arc<AtomicU64>,
+    thread: Option<thread::JoinHandle<()>>,
 }
 
 impl Worker {
@@ -87,7 +89,7 @@ impl Worker {
         let (jobs, rx) = mpsc::channel();
         let cancelled = Arc::new(AtomicU64::new(0));
         let flag = cancelled.clone();
-        thread::Builder::new()
+        let thread = thread::Builder::new()
             .name("fi-whisper-asr".into())
             .spawn(move || {
                 // `rx` ikut di-drop saat unwind, jadi `send` berikutnya langsung gagal.
@@ -97,7 +99,11 @@ impl Worker {
                 }
             })
             .expect("thread worker ASR");
-        Self { jobs, cancelled }
+        Self {
+            jobs,
+            cancelled,
+            thread: Some(thread),
+        }
     }
 
     pub fn send(&self, job: Job) -> Result<(), WorkerGone> {
@@ -106,6 +112,16 @@ impl Worker {
 
     pub fn cancel(&self, session: u64) {
         self.cancelled.fetch_max(session, Ordering::SeqCst);
+    }
+}
+
+impl Drop for Worker {
+    fn drop(&mut self) {
+        self.cancel(u64::MAX);
+        let _ = self.jobs.send(Job::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
     }
 }
 
@@ -138,7 +154,11 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Even
     let mut models: Option<Models> = None;
     let threads = thread::available_parallelism().map_or(4, |n| n.get().min(8)) as i32;
     while let Ok(job) = rx.recv() {
+        if cancelled.load(Ordering::SeqCst) == u64::MAX {
+            break;
+        }
         match job {
+            Job::Shutdown => break,
             Job::Load { engine, asr, vad } => {
                 let started = Instant::now();
                 take_log();
@@ -304,6 +324,9 @@ fn transcribe(
     mut timing: Timing,
 ) -> (Outcome, Timing) {
     let is_cancelled = || cancelled.load(Ordering::SeqCst) >= session;
+    if is_cancelled() {
+        return (Outcome::Cancelled, timing);
+    }
     if samples.is_empty() {
         return (Outcome::NoSpeech, timing);
     }
@@ -500,6 +523,19 @@ fn backend_summary(log: &[String]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_worker_joins_and_releases_callback() {
+        let target = Arc::new(());
+        let weak = Arc::downgrade(&target);
+        let worker = Worker::spawn(move |_| {
+            let _ = &target;
+        });
+        let cancelled = worker.cancelled.clone();
+        drop(worker);
+        assert_eq!(cancelled.load(Ordering::SeqCst), u64::MAX);
+        assert!(weak.upgrade().is_none());
+    }
 
     #[test]
     fn speech_range_keeps_middle_pause_and_pads() {

@@ -2,12 +2,15 @@
 
 use global_hotkey::hotkey::HotKey;
 use global_hotkey::{GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{
     CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HWND,
 };
+use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
@@ -147,9 +150,12 @@ pub enum Inserted {
 }
 
 /// Ketik `text` ke target dengan KEYEVENTF_UNICODE. Foreground diperiksa sebelum setiap batch.
-pub fn insert_text(target: Target, text: &str) -> Inserted {
+pub fn insert_text(target: Target, text: &str, cancelled: &AtomicBool) -> Inserted {
     let deadline = Instant::now() + Duration::from_millis(1500);
     while modifiers_down() {
+        if cancelled.load(Ordering::SeqCst) {
+            return Inserted::Blocked("Aplikasi ditutup.".into());
+        }
         if Instant::now() > deadline {
             return Inserted::Blocked("Tombol modifier masih ditekan.".into());
         }
@@ -163,6 +169,13 @@ pub fn insert_text(target: Target, text: &str) -> Inserted {
     let total = chars.len();
     let mut sent = 0;
     for batch in chars.chunks(BATCH_CHARS) {
+        if cancelled.load(Ordering::SeqCst) {
+            return if sent == 0 {
+                Inserted::Blocked("Aplikasi ditutup.".into())
+            } else {
+                Inserted::Partial { sent, total }
+            };
+        }
         if let Err(reason) = may_insert(Some(target), current_target_valid(target)) {
             return if sent == 0 {
                 Inserted::Blocked(match reason {
@@ -223,6 +236,44 @@ pub fn unicode_inputs(chars: &[char]) -> Vec<INPUT> {
 }
 
 // --- Jendela utama ---
+
+pub struct StartupWindow {
+    hwnd: isize,
+    frame: u64,
+}
+
+impl StartupWindow {
+    pub fn new(hwnd: isize, frame: u64) -> Option<Self> {
+        set_cloaked(hwnd, true).then_some(Self { hwnd, frame })
+    }
+
+    pub fn ready(&self, ctx: &eframe::egui::Context) -> bool {
+        if ctx.cumulative_frame_nr() > self.frame {
+            return true;
+        }
+        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::RequestPaintWhileHidden);
+        ctx.request_repaint();
+        false
+    }
+}
+
+impl Drop for StartupWindow {
+    fn drop(&mut self) {
+        set_cloaked(self.hwnd, false);
+    }
+}
+
+fn set_cloaked(hwnd: isize, cloaked: bool) -> bool {
+    let value = i32::from(cloaked);
+    unsafe {
+        DwmSetWindowAttribute(
+            hwnd as HWND,
+            DWMWA_CLOAK as u32,
+            (&raw const value).cast(),
+            size_of::<i32>() as u32,
+        ) >= 0
+    }
+}
 
 pub fn show_window(hwnd: isize) {
     let hwnd = hwnd as HWND;
@@ -300,24 +351,41 @@ unsafe fn set_data(format: u32, data: &[u16]) -> Result<(), String> {
 
 // --- Hotkey global ---
 
+type HotkeyCallback = dyn Fn() + Send + Sync;
+// Setter dependency memakai OnceCell; handler tetap hanya meneruskan ke pemilik yang masih hidup.
+static HOTKEY_CALLBACK: Mutex<Option<Weak<HotkeyCallback>>> = Mutex::new(None);
+
+fn hotkey_event(e: GlobalHotKeyEvent) {
+    let callback = HOTKEY_CALLBACK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(Weak::upgrade);
+    if e.state() == HotKeyState::Pressed
+        && let Some(callback) = callback
+    {
+        callback();
+    }
+}
+
 /// Harus dibuat di thread utama (message loop winit).
 pub struct Hotkeys {
     manager: GlobalHotKeyManager,
     pub active: Option<(HotKey, String)>,
+    _callback: Arc<HotkeyCallback>,
 }
 
 impl Hotkeys {
     pub fn new(on_press: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
         let manager = GlobalHotKeyManager::new()
             .map_err(|e| format!("Shortcut global tidak tersedia: {e}"))?;
-        GlobalHotKeyEvent::set_event_handler(Some(move |e: GlobalHotKeyEvent| {
-            if e.state() == HotKeyState::Pressed {
-                on_press();
-            }
-        }));
+        let callback: Arc<HotkeyCallback> = Arc::new(on_press);
+        *HOTKEY_CALLBACK.lock().unwrap() = Some(Arc::downgrade(&callback));
+        GlobalHotKeyEvent::set_event_handler(Some(hotkey_event));
         Ok(Self {
             manager,
             active: None,
+            _callback: callback,
         })
     }
 
@@ -349,7 +417,6 @@ impl Drop for Hotkeys {
         if let Some((hotkey, _)) = self.active.take() {
             let _ = self.manager.unregister(hotkey);
         }
-        GlobalHotKeyEvent::set_event_handler(None::<fn(GlobalHotKeyEvent)>);
     }
 }
 
@@ -363,6 +430,48 @@ pub enum TrayAction {
 
 pub struct Tray {
     _icon: TrayIcon,
+    _callback: Arc<TrayCallback>,
+}
+
+struct TrayCallback {
+    ids: [MenuId; 3],
+    action: Box<dyn Fn(TrayAction) + Send + Sync>,
+}
+
+static TRAY_CALLBACK: Mutex<Option<Weak<TrayCallback>>> = Mutex::new(None);
+
+fn menu_event(e: MenuEvent) {
+    let callback = TRAY_CALLBACK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(Weak::upgrade);
+    if let Some(callback) = callback {
+        if e.id == callback.ids[0] {
+            (callback.action)(TrayAction::Open)
+        } else if e.id == callback.ids[1] {
+            (callback.action)(TrayAction::Cancel)
+        } else if e.id == callback.ids[2] {
+            (callback.action)(TrayAction::Quit)
+        }
+    }
+}
+
+fn tray_event(e: TrayIconEvent) {
+    let callback = TRAY_CALLBACK
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(Weak::upgrade);
+    if let TrayIconEvent::Click {
+        button: MouseButton::Left,
+        button_state: MouseButtonState::Up,
+        ..
+    } = e
+        && let Some(callback) = callback
+    {
+        (callback.action)(TrayAction::Open)
+    }
 }
 
 /// Buat ikon tray. Handler dipanggil dari message loop thread utama.
@@ -380,35 +489,17 @@ pub fn create_tray(on_action: impl Fn(TrayAction) + Send + Sync + 'static) -> Re
         .with_menu_on_left_click(false)
         .build()
         .map_err(|e| format!("Ikon tray gagal dibuat: {e}"))?;
-    let on_action = std::sync::Arc::new(on_action);
-    let menu_action = on_action.clone();
-    MenuEvent::set_event_handler(Some(move |e: MenuEvent| {
-        if e.id == ids[0] {
-            menu_action(TrayAction::Open)
-        } else if e.id == ids[1] {
-            menu_action(TrayAction::Cancel)
-        } else if e.id == ids[2] {
-            menu_action(TrayAction::Quit)
-        }
-    }));
-    TrayIconEvent::set_event_handler(Some(move |e: TrayIconEvent| {
-        if let TrayIconEvent::Click {
-            button: MouseButton::Left,
-            button_state: MouseButtonState::Up,
-            ..
-        } = e
-        {
-            on_action(TrayAction::Open)
-        }
-    }));
-    Ok(Tray { _icon: icon })
-}
-
-impl Drop for Tray {
-    fn drop(&mut self) {
-        MenuEvent::set_event_handler(None::<fn(MenuEvent)>);
-        TrayIconEvent::set_event_handler(None::<fn(TrayIconEvent)>);
-    }
+    let callback = Arc::new(TrayCallback {
+        ids,
+        action: Box::new(on_action),
+    });
+    *TRAY_CALLBACK.lock().unwrap() = Some(Arc::downgrade(&callback));
+    MenuEvent::set_event_handler(Some(menu_event));
+    TrayIconEvent::set_event_handler(Some(tray_event));
+    Ok(Tray {
+        _icon: icon,
+        _callback: callback,
+    })
 }
 
 /// Ikon tray dari logo aplikasi (Windows menskalakan ke ukuran tray).
@@ -420,6 +511,81 @@ fn tray_icon_image() -> tray_icon::Icon {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_waits_for_complete_frame_including_discarded_passes() {
+        use eframe::egui::{Context, RawInput, ViewportCommand, ViewportId};
+
+        assert!(StartupWindow::new(0, 0).is_none());
+        let ctx = Context::default();
+        let startup = StartupWindow {
+            hwnd: 0,
+            frame: ctx.cumulative_frame_nr(),
+        };
+        let logic = ctx.run_logic(&RawInput::default(), |ctx| assert!(!startup.ready(ctx)));
+        assert!(
+            logic.viewport_commands[&ViewportId::ROOT]
+                .contains(&ViewportCommand::RequestPaintWhileHidden)
+        );
+        let mut passes = 0;
+        let _ = ctx.run_ui(RawInput::default(), |ui| {
+            assert!(!startup.ready(ui.ctx()));
+            passes += 1;
+            ui.label("Uji");
+            if passes == 1 {
+                ui.ctx().request_discard("uji multipass");
+            }
+        });
+        assert_eq!(passes, 2);
+        assert!(startup.ready(&ctx));
+    }
+
+    #[test]
+    fn callbacks_release_targets_and_hotkeys_can_be_recreated() {
+        let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
+        for expected in 1..=2 {
+            let target = calls.clone();
+            let hotkeys = Hotkeys::new(move || {
+                target.fetch_add(1, Ordering::SeqCst);
+            })
+            .unwrap();
+            hotkey_event(GlobalHotKeyEvent {
+                id: 0,
+                state: HotKeyState::Pressed,
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), expected);
+            drop(hotkeys);
+            assert_eq!(Arc::strong_count(&calls), 1);
+        }
+        let target = calls.clone();
+        let callback = Arc::new(TrayCallback {
+            ids: [
+                MenuId::new("open"),
+                MenuId::new("cancel"),
+                MenuId::new("quit"),
+            ],
+            action: Box::new(move |_| {
+                target.fetch_add(1, Ordering::SeqCst);
+            }),
+        });
+        *TRAY_CALLBACK.lock().unwrap() = Some(Arc::downgrade(&callback));
+        menu_event(MenuEvent {
+            id: MenuId::new("open"),
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        drop(callback);
+        menu_event(MenuEvent {
+            id: MenuId::new("open"),
+        });
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(Arc::strong_count(&calls), 1);
+    }
+
+    #[test]
+    fn shutdown_blocks_insertion_before_sending_input() {
+        let result = insert_text(Target { hwnd: 0, pid: 0 }, "uji", &AtomicBool::new(true));
+        assert_eq!(result, Inserted::Blocked("Aplikasi ditutup.".into()));
+    }
 
     #[test]
     fn insertion_requires_same_target() {

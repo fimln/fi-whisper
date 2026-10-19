@@ -28,6 +28,7 @@ struct App {
     logo: egui::TextureHandle,
     icons: theme::Icons,
     window: Arc<Window>,
+    startup: Option<windows::StartupWindow>,
     config: Config,
     config_path: Option<PathBuf>,
     /// Error config rusak; selama ada, config tidak ditulis agar file lama tidak tertimpa.
@@ -65,6 +66,11 @@ impl App {
         {
             window.hwnd.store(h.hwnd.get(), Ordering::SeqCst);
         }
+        // shortcut: Glow eframe 0.37 menampilkan jendela sebelum swap_buffers; hapus saat upstream memperbaikinya.
+        let startup = windows::StartupWindow::new(
+            window.hwnd.load(Ordering::SeqCst),
+            cc.egui_ctx.cumulative_frame_nr(),
+        );
 
         let ctx = cc.egui_ctx.clone();
         let core = controller::spawn(move || ctx.request_repaint());
@@ -107,6 +113,7 @@ impl App {
             logo: theme::logo_texture(&cc.egui_ctx),
             icons: theme::Icons::load(&cc.egui_ctx),
             window,
+            startup,
             engine: config.engine,
             asr: config
                 .asr_model
@@ -232,12 +239,29 @@ impl App {
                 st.loaded.as_ref().map(|l| l.0),
             )
         };
+        // Tanpa title bar OS: area kosong header menjadi pegangan geser jendela. Didaftarkan
+        // sebelum isi header agar tombol dan badge tetap menerima klik.
+        let drag = ui.interact(
+            ui.max_rect().expand2(vec2(16.0, 12.0)),
+            ui.scope_id().with("drag"),
+            egui::Sense::click_and_drag(),
+        );
+        if drag.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 10.0;
             ui.add(egui::Image::new((self.logo.id(), vec2(30.0, 30.0))));
             ui.label(RichText::new("fi-whisper").font(semibold(21.0)).color(TEXT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
+                if window_badge(ui, &self.icons.close, DANGER, "Tutup") {
+                    ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                }
+                if window_badge(ui, &self.icons.minimize, SECONDARY, "Perkecil") {
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::Minimized(true));
+                }
                 link_badge(ui, &self.icons.home, None, LINK_HOME, HOME_URL);
                 link_badge(
                     ui,
@@ -442,39 +466,52 @@ impl App {
                     .find(|m| &m.id == id)
                     .map_or_else(|| "Perangkat tidak ditemukan".into(), |m| m.name.clone()),
             };
-            let combo = egui::ComboBox::from_id_salt("microphone")
-                .width(width)
-                .truncate()
-                .selected_text(selected)
-                .show_ui(ui, |ui| {
-                    changed |= ui
-                        .selectable_value(&mut self.config.microphone, None, "Default sistem")
-                        .changed();
+            let response = combo(
+                ui,
+                egui::ComboBox::from_id_salt("microphone")
+                    .width(width)
+                    .truncate()
+                    .selected_text(selected),
+                |ui| {
+                    changed |= interactive(ui, |ui| {
+                        ui.selectable_value(&mut self.config.microphone, None, "Default sistem")
+                    })
+                    .changed();
                     for mic in &self.mics {
-                        changed |= ui
-                            .selectable_value(
+                        changed |= interactive(ui, |ui| {
+                            ui.selectable_value(
                                 &mut self.config.microphone,
                                 Some(mic.id.clone()),
                                 &mic.name,
                             )
-                            .changed();
+                        })
+                        .changed();
                     }
-                });
+                },
+            );
             // Daftar perangkat diperbarui setiap kali dropdown dibuka.
-            if combo.response.clicked() {
+            if response.clicked() {
                 self.refresh_mics();
             }
             field_label(ui, "Bahasa");
-            egui::ComboBox::from_id_salt("language")
-                .width(width)
-                .selected_text(self.config.language.label())
-                .show_ui(ui, |ui| {
+            combo(
+                ui,
+                egui::ComboBox::from_id_salt("language")
+                    .width(width)
+                    .selected_text(self.config.language.label()),
+                |ui| {
                     for language in Language::ALL {
-                        changed |= ui
-                            .selectable_value(&mut self.config.language, language, language.label())
-                            .changed();
+                        changed |= interactive(ui, |ui| {
+                            ui.selectable_value(
+                                &mut self.config.language,
+                                language,
+                                language.label(),
+                            )
+                        })
+                        .changed();
                     }
-                });
+                },
+            );
             field_label(ui, "Shortcut");
             ui.horizontal(|ui| {
                 let id = egui::Id::unique("shortcut-input");
@@ -516,31 +553,36 @@ impl App {
         field_label(ui, "Tombol close");
         let tray = self.tray.is_some();
         let mut close_changed = false;
-        egui::ComboBox::from_id_salt("close-action")
-            .width(width)
-            .selected_text(if self.config.close_to_tray && tray {
-                "Sembunyikan ke tray"
-            } else {
-                "Keluar dari aplikasi"
-            })
-            .show_ui(ui, |ui| {
+        combo(
+            ui,
+            egui::ComboBox::from_id_salt("close-action")
+                .width(width)
+                .selected_text(if self.config.close_to_tray && tray {
+                    "Sembunyikan ke tray"
+                } else {
+                    "Keluar dari aplikasi"
+                }),
+            |ui| {
                 ui.add_enabled_ui(tray, |ui| {
-                    close_changed |= ui
-                        .selectable_value(
+                    close_changed |= interactive(ui, |ui| {
+                        ui.selectable_value(
                             &mut self.config.close_to_tray,
                             true,
                             "Sembunyikan ke tray",
                         )
-                        .changed();
+                    })
+                    .changed();
                 });
-                close_changed |= ui
-                    .selectable_value(
+                close_changed |= interactive(ui, |ui| {
+                    ui.selectable_value(
                         &mut self.config.close_to_tray,
                         false,
                         "Keluar dari aplikasi",
                     )
-                    .changed();
-            });
+                })
+                .changed();
+            },
+        );
         if close_changed {
             self.save_config();
         }
@@ -571,14 +613,19 @@ impl App {
         }
         ui.add_enabled_ui(!phase.busy(), |ui| {
             field_label(ui, "Mesin ASR");
-            egui::ComboBox::from_id_salt("engine")
-                .width(ui.available_width())
-                .selected_text(self.engine.label())
-                .show_ui(ui, |ui| {
+            combo(
+                ui,
+                egui::ComboBox::from_id_salt("engine")
+                    .width(ui.available_width())
+                    .selected_text(self.engine.label()),
+                |ui| {
                     for engine in Engine::ALL {
-                        ui.selectable_value(&mut self.engine, engine, engine.label());
+                        interactive(ui, |ui| {
+                            ui.selectable_value(&mut self.engine, engine, engine.label())
+                        });
                     }
-                });
+                },
+            );
             let engine = self.engine;
             let (label, pick) = if engine.is_qwen() {
                 ("Folder model", Pick::Folder)
@@ -609,13 +656,17 @@ impl App {
                     egui::Button::new("Muat ulang")
                 } else {
                     // Pilihan berbeda dari model aktif: tonjolkan aksi yang perlu dilakukan.
+                    let w = &mut ui.visuals_mut().widgets;
+                    w.inactive.bg_fill = ACCENT_TINT;
+                    w.hovered.bg_fill = ACCENT_TINT.gamma_multiply(1.6);
+                    w.active.bg_fill = ACCENT_TINT.gamma_multiply(2.0);
+                    w.inactive.bg_stroke.color = ACCENT_BORDER;
                     egui::Button::new(RichText::new("Muat model").color(ACCENT_HOVER))
-                        .fill(ACCENT_TINT)
-                        .stroke(egui::Stroke::new(1.0, ACCENT_BORDER))
                 };
-                if ui
-                    .add_enabled(selected.is_some() && self.vad.is_some(), button)
-                    .clicked()
+                if interactive(ui, |ui| {
+                    ui.add_enabled(selected.is_some() && self.vad.is_some(), button)
+                })
+                .clicked()
                     && let (Some(asr), Some(vad)) = (selected.clone(), self.vad.clone())
                 {
                     self.config.engine = self.engine;
@@ -645,13 +696,16 @@ impl App {
             });
         });
         if !diagnostics.is_empty() {
-            egui::CollapsingHeader::new(RichText::new("Diagnostik").small().color(SECONDARY))
-                .id_salt("diagnostics")
-                .show(ui, |ui| {
-                    for line in &diagnostics {
-                        ui.label(RichText::new(line).monospace().size(11.0).color(SECONDARY));
-                    }
-                });
+            interactive(ui, |ui| {
+                egui::CollapsingHeader::new(RichText::new("Diagnostik").small().color(SECONDARY))
+                    .id_salt("diagnostics")
+                    .show(ui, |ui| {
+                        for line in &diagnostics {
+                            ui.label(RichText::new(line).monospace().size(11.0).color(SECONDARY));
+                        }
+                    })
+                    .header_response
+            });
         }
     }
 
@@ -659,7 +713,7 @@ impl App {
         card().show(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.label(RichText::new(&self.config_error).small().color(WARN));
-            if ui.button("Reset konfigurasi ke default").clicked() {
+            if secondary(ui, true, "Reset konfigurasi ke default").clicked() {
                 self.config = Config::default();
                 self.config_error.clear();
                 self.save_config();
@@ -864,6 +918,13 @@ fn model_field(ui: &mut Ui, label: &str, pick: Pick, default: &str, path: &mut O
 
 impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self
+            .startup
+            .as_ref()
+            .is_some_and(|startup| startup.ready(ctx))
+        {
+            self.startup = None;
+        }
         if self.window.quitting.load(Ordering::SeqCst) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
             return;
@@ -911,6 +972,79 @@ impl eframe::App for App {
                     }
                 });
             });
+        resize_edges(root);
+    }
+}
+
+/// Jendela tanpa dekorasi tidak punya bingkai resize dari OS (winit membuang area non-client),
+/// jadi tepi dan sudut jendela dijadikan pegangan `BeginResize`. Didaftarkan terakhir agar
+/// menang atas widget di bawahnya; sudut setelah tepi agar diagonal diprioritaskan.
+fn resize_edges(ui: &mut Ui) {
+    use egui::{CursorIcon as C, ResizeDirection as D, pos2};
+    let r = ui.ctx().content_rect();
+    let (e, k) = (5.0, 12.0);
+    let edges = [
+        (
+            pos2(r.left(), r.top()),
+            pos2(r.right(), r.top() + e),
+            D::North,
+            C::ResizeNorth,
+        ),
+        (
+            pos2(r.left(), r.bottom() - e),
+            pos2(r.right(), r.bottom()),
+            D::South,
+            C::ResizeSouth,
+        ),
+        (
+            pos2(r.left(), r.top()),
+            pos2(r.left() + e, r.bottom()),
+            D::West,
+            C::ResizeWest,
+        ),
+        (
+            pos2(r.right() - e, r.top()),
+            pos2(r.right(), r.bottom()),
+            D::East,
+            C::ResizeEast,
+        ),
+        (
+            pos2(r.left(), r.top()),
+            pos2(r.left() + k, r.top() + k),
+            D::NorthWest,
+            C::ResizeNorthWest,
+        ),
+        (
+            pos2(r.right() - k, r.top()),
+            pos2(r.right(), r.top() + k),
+            D::NorthEast,
+            C::ResizeNorthEast,
+        ),
+        (
+            pos2(r.left(), r.bottom() - k),
+            pos2(r.left() + k, r.bottom()),
+            D::SouthWest,
+            C::ResizeSouthWest,
+        ),
+        (
+            pos2(r.right() - k, r.bottom() - k),
+            pos2(r.right(), r.bottom()),
+            D::SouthEast,
+            C::ResizeSouthEast,
+        ),
+    ];
+    for (i, (min, max, dir, cursor)) in edges.into_iter().enumerate() {
+        let response = ui
+            .interact(
+                egui::Rect::from_min_max(min, max),
+                ui.scope_id().with(("resize", i)),
+                egui::Sense::drag(),
+            )
+            .on_hover_cursor(cursor);
+        if response.drag_started_by(egui::PointerButton::Primary) {
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+        }
     }
 }
 
@@ -923,8 +1057,9 @@ fn main() -> eframe::Result {
         "fi-whisper",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([620.0, 730.0])
+                .with_inner_size([700.0, 730.0])
                 .with_min_inner_size([560.0, 600.0])
+                .with_decorations(false)
                 .with_icon(theme::icon()),
             renderer: eframe::Renderer::Glow,
             centered: true,

@@ -5,7 +5,7 @@ use crate::config::{Engine, Language};
 use crate::transcribe::{self, Job, Outcome, Timing, Worker};
 use crate::windows::{self, Inserted, Target};
 use std::path::PathBuf;
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
@@ -65,6 +65,7 @@ pub struct Status {
 }
 
 pub enum Cmd {
+    Shutdown,
     Toggle(Source),
     Cancel,
     Load {
@@ -92,10 +93,11 @@ pub enum Cmd {
     },
 }
 
-#[derive(Clone)]
 pub struct Handle {
     pub tx: Sender<Cmd>,
     pub status: Arc<Mutex<Status>>,
+    thread: Option<thread::JoinHandle<()>>,
+    shutting_down: Arc<AtomicBool>,
 }
 
 impl Handle {
@@ -108,18 +110,31 @@ impl Handle {
     }
 }
 
+impl Drop for Handle {
+    fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        self.send(Cmd::Shutdown);
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
 pub fn spawn(repaint: impl Fn() + Send + 'static) -> Handle {
     let (tx, rx) = mpsc::channel();
     let mut controller = Controller::new(tx.clone());
-    let handle = Handle {
-        tx,
-        status: controller.status.clone(),
-    };
-    thread::Builder::new()
+    let status = controller.status.clone();
+    let shutting_down = controller.shutting_down.clone();
+    let thread = thread::Builder::new()
         .name("fi-whisper-controller".into())
         .spawn(move || controller.run(rx, repaint))
         .expect("thread controller");
-    handle
+    Handle {
+        tx,
+        status,
+        thread: Some(thread),
+        shutting_down,
+    }
 }
 
 fn spawn_worker(tx: &Sender<Cmd>, generation: u64) -> Worker {
@@ -148,8 +163,21 @@ struct Controller {
     stopped_at: Option<Instant>,
     /// Capture sudah dihentikan tetapi audio belum dikirim ke worker.
     awaiting_capture: bool,
-    injecting: bool,
+    injecting: Option<thread::JoinHandle<()>>,
+    shutting_down: Arc<AtomicBool>,
     cancelling: bool,
+}
+
+impl Drop for Controller {
+    fn drop(&mut self) {
+        self.shutting_down.store(true, Ordering::SeqCst);
+        if let Some(c) = self.capture.take() {
+            c.cancel();
+        }
+        if let Some(thread) = self.injecting.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Controller {
@@ -181,18 +209,19 @@ impl Controller {
             target: None,
             stopped_at: None,
             awaiting_capture: false,
-            injecting: false,
+            injecting: None,
+            shutting_down: Arc::new(AtomicBool::new(false)),
             cancelling: false,
         }
     }
 
     fn run(&mut self, rx: Receiver<Cmd>, repaint: impl Fn()) {
         while let Ok(cmd) = rx.recv() {
+            if self.shutting_down.load(Ordering::SeqCst) || matches!(cmd, Cmd::Shutdown) {
+                break;
+            }
             self.handle(cmd);
             repaint();
-        }
-        if let Some(c) = self.capture.take() {
-            c.cancel();
         }
     }
 
@@ -202,6 +231,7 @@ impl Controller {
 
     fn handle(&mut self, cmd: Cmd) {
         match cmd {
+            Cmd::Shutdown => {}
             Cmd::Toggle(source) => self.toggle(source),
             Cmd::Cancel => self.cancel(),
             Cmd::Load { engine, asr, vad } => {
@@ -229,7 +259,9 @@ impl Controller {
             Cmd::Worker { worker, event } if worker == self.worker_gen => self.worker_event(event),
             Cmd::Worker { .. } => {}
             Cmd::Inserted { session, outcome } => {
-                self.injecting = false;
+                if let Some(thread) = self.injecting.take() {
+                    let _ = thread.join();
+                }
                 if session != self.session {
                     return;
                 }
@@ -251,7 +283,7 @@ impl Controller {
         match phase {
             Phase::Recording => self.stop(),
             Phase::Ready | Phase::Error if self.st().loaded.is_some() => {
-                if self.injecting {
+                if self.injecting.is_some() {
                     self.st().note = "Sedang memasukkan teks; tunggu sebentar.".into();
                 } else {
                     self.start(source);
@@ -500,12 +532,12 @@ impl Controller {
                         };
                         drop(st);
                         if let Some(target) = target {
-                            self.injecting = true;
                             let tx = self.tx.clone();
-                            thread::spawn(move || {
-                                let outcome = windows::insert_text(target, &text);
+                            let shutting_down = self.shutting_down.clone();
+                            self.injecting = Some(thread::spawn(move || {
+                                let outcome = windows::insert_text(target, &text, &shutting_down);
                                 let _ = tx.send(Cmd::Inserted { session, outcome });
-                            });
+                            }));
                         }
                     }
                     Outcome::NoSpeech => {
@@ -527,6 +559,21 @@ impl Controller {
 mod tests {
     use super::*;
     use crate::audio::Recording;
+
+    #[test]
+    fn dropping_handle_stops_threads_despite_remaining_senders() {
+        let repaint = Arc::new(());
+        let weak_repaint = Arc::downgrade(&repaint);
+        let handle = spawn(move || {
+            let _ = &repaint;
+        });
+        let status = Arc::downgrade(&handle.status);
+        let sender = handle.tx.clone();
+        drop(handle);
+        assert!(sender.send(Cmd::ClearResult).is_err());
+        assert!(status.upgrade().is_none());
+        assert!(weak_repaint.upgrade().is_none());
+    }
 
     fn recv(rx: &Receiver<Cmd>) -> Cmd {
         rx.recv_timeout(Duration::from_secs(5))

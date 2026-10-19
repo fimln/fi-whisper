@@ -65,6 +65,16 @@ enum Signal {
 pub struct Capture {
     signal: mpsc::Sender<Signal>,
     pub level: Arc<AtomicU32>,
+    thread: Option<thread::JoinHandle<()>>,
+}
+
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.cancel();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
 }
 
 impl Capture {
@@ -87,12 +97,16 @@ pub fn start(
     let (ready_tx, ready_rx) = mpsc::sync_channel(1);
     let level = Arc::new(AtomicU32::new(0));
     let thread_level = level.clone();
-    thread::Builder::new()
+    let thread = thread::Builder::new()
         .name("fi-whisper-capture".into())
         .spawn(move || capture_thread(mic, signal_rx, ready_tx, thread_level, on_end))
         .map_err(|e| format!("Thread audio gagal dibuat: {e}"))?;
     match ready_rx.recv_timeout(Duration::from_secs(10)) {
-        Ok(Ok(())) => Ok(Capture { signal, level }),
+        Ok(Ok(())) => Ok(Capture {
+            signal,
+            level,
+            thread: Some(thread),
+        }),
         Ok(Err(e)) => Err(e),
         Err(_) => Err("Mikrofon tidak merespons saat dibuka.".into()),
     }
@@ -118,7 +132,9 @@ fn capture_thread(
     });
     let (stream, mut consumer, rate) = match open(mic, shared.clone()) {
         Ok(v) => {
-            let _ = ready.send(Ok(()));
+            if ready.send(Ok(())).is_err() {
+                return;
+            }
             v
         }
         Err(e) => {
@@ -318,6 +334,23 @@ pub fn resample(samples: Vec<f32>, rate: u32) -> Result<Vec<f32>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dropping_capture_cancels_and_joins() {
+        let (signal, rx) = mpsc::channel();
+        let done = Arc::new(AtomicBool::new(false));
+        let thread_done = done.clone();
+        let capture = Capture {
+            signal,
+            level: Arc::new(AtomicU32::new(0)),
+            thread: Some(thread::spawn(move || {
+                assert!(matches!(rx.recv().unwrap(), Signal::Cancel));
+                thread_done.store(true, Ordering::SeqCst);
+            })),
+        };
+        drop(capture);
+        assert!(done.load(Ordering::SeqCst));
+    }
 
     fn run<T: Sample>(data: &[T], channels: usize, capacity: usize) -> (Vec<f32>, bool, f32)
     where

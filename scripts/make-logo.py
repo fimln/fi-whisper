@@ -50,7 +50,7 @@ def render_icons() -> None:
     """Octicons (MIT, assets/icons) dirender jadi RGBA 64×64 putih; diwarnai saat runtime."""
     import pymupdf  # merender SVG
 
-    for name in ("mark-github-24", "home-fill-24"):
+    for name in ("mark-github-24", "home-fill-24", "dash-24", "x-24"):
         svg = (OUT / "icons" / f"{name}.svg").read_text().replace("<path ", '<path fill="#fff" ')
         page = pymupdf.open(stream=svg.encode(), filetype="svg")[0]
         pix = page.get_pixmap(matrix=pymupdf.Matrix(64 / 24, 64 / 24), alpha=True)
