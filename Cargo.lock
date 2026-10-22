@@ -3898,6 +3898,7 @@ dependencies = [
  "candle-nn",
  "hound",
  "log",
+ "memmap2",
  "rubato 0.15.0",
  "rustfft",
  "safetensors 0.4.5",

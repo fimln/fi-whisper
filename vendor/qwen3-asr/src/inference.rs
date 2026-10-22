@@ -624,7 +624,7 @@ fn load_weights(model_dir: &Path, device: &Device) -> anyhow::Result<HashMap<Str
         let mut all_weights = HashMap::new();
         for shard in shard_files {
             let shard_path = model_dir.join(&shard);
-            let w = candle_core::safetensors::load(&shard_path, device)?;
+            let w = load_checkpoint(&shard_path, device)?;
             all_weights.extend(w);
         }
         return Ok(all_weights);
@@ -632,8 +632,29 @@ fn load_weights(model_dir: &Path, device: &Device) -> anyhow::Result<HashMap<Str
 
     // Single file
     let model_path = model_dir.join("model.safetensors");
-    candle_core::safetensors::load(&model_path, device).map_err(Into::into)
+    load_checkpoint(&model_path, device)
 }
+
+fn load_checkpoint(path: &Path, device: &Device) -> anyhow::Result<HashMap<String, Tensor>> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        let file = std::fs::OpenOptions::new().read(true).share_mode(1).open(path)?;
+        // SAFETY: FILE_SHARE_READ excludes writers, writable mappings and deletion until file drops.
+        // Map this handle, not a reopened path; mapping drops before the file guard.
+        let mapping = unsafe { memmap2::Mmap::map(&file)? };
+        let weights = candle_core::safetensors::load_buffer(&mapping, device);
+        // Finish uploads before unmapping, including when a later tensor failed to load.
+        device.synchronize()?;
+        Ok(weights?)
+    }
+    #[cfg(not(windows))]
+    candle_core::safetensors::load(path, device).map_err(Into::into)
+}
+
+#[cfg(test)]
+#[path = "checkpoint_tests.rs"]
+mod checkpoint_tests;
 
 #[cfg(test)]
 mod tests {
