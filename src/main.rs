@@ -378,11 +378,12 @@ impl App {
                         .x
                         + 28.0;
                     if ui.available_width() >= width {
-                        let badge_color = if engine != Engine::GoogleChirp3 && backend == "CPU" {
-                            WARN
-                        } else {
-                            SECONDARY
-                        };
+                        let badge_color =
+                            if engine != Engine::GoogleChirp3 && backend.starts_with("CPU") {
+                                WARN
+                            } else {
+                                SECONDARY
+                            };
                         status_badge(ui, &text, badge_color, badge_color);
                     }
                 }
@@ -579,24 +580,48 @@ impl App {
             }
             if status.is_some() || timing.is_some() {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if let Some((t, total)) = timing {
-                        ui.label(
-                            RichText::new(format!(
-                                "{:.1} s audio, {:.2} s",
-                                t.audio.as_secs_f32(),
-                                total.as_secs_f32()
-                            ))
-                            .small()
-                            .color(SECONDARY),
-                        )
-                        .on_hover_text(format!(
-                            "VAD {:.2} s, ASR {:.2} s",
-                            t.vad.as_secs_f32(),
-                            t.asr.as_secs_f32()
-                        ));
+                    let text_width = |ui: &Ui, s: &str, color| {
+                        ui.painter()
+                            .layout_no_wrap(s.to_owned(), egui::FontId::proportional(12.0), color)
+                            .size()
+                            .x
+                    };
+                    let status_reserve = match status {
+                        Some(s) if result_note == COPIED => {
+                            text_width(ui, s, SUCCESS) + ui.spacing().item_spacing.x
+                        }
+                        _ => 0.0,
+                    };
+                    if let Some((tm, total)) = timing {
+                        let full = format!(
+                            "{:.1} s audio, {:.2} s {}",
+                            tm.audio.as_secs_f32(),
+                            total.as_secs_f32(),
+                            t("proses", "processing")
+                        );
+                        let avail = ui.available_width() - status_reserve;
+                        let label = if avail >= text_width(ui, &full, SECONDARY) {
+                            Some(full)
+                        } else {
+                            let short = format!(
+                                "{:.1} s, {:.2} s {}",
+                                tm.audio.as_secs_f32(),
+                                total.as_secs_f32(),
+                                t("proses", "proc")
+                            );
+                            (avail >= text_width(ui, &short, SECONDARY)).then_some(short)
+                        };
+                        if let Some(label) = label {
+                            ui.label(RichText::new(label).small().color(SECONDARY))
+                                .on_hover_text(format!(
+                                    "VAD {:.2} s, ASR {:.2} s",
+                                    tm.vad.as_secs_f32(),
+                                    tm.asr.as_secs_f32()
+                                ));
+                        }
                     }
                     if let Some(text) = status
-                        && ui.available_width() >= 54.0
+                        && ui.available_width() >= text_width(ui, text, SUCCESS)
                     {
                         ui.label(RichText::new(text).small().color(SUCCESS));
                     }

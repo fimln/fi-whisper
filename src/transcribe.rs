@@ -255,12 +255,6 @@ fn reset_cuda_device() {
         }
         let _ = cudaDeviceReset();
     }
-    #[cfg(all(feature = "qwen-cuda", not(feature = "cuda")))]
-    unsafe {
-        if let Ok(dev) = candle_core::cuda_backend::cudarc::driver::result::device::get(0) {
-            let _ = candle_core::cuda_backend::cudarc::driver::result::primary_ctx::reset(dev);
-        }
-    }
 }
 
 fn path_str(path: &Path) -> Result<&str, String> {
