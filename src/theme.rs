@@ -355,7 +355,37 @@ pub fn status_badge(ui: &mut Ui, text: &str, color: Color32, background: Color32
         .inner_margin(Margin::symmetric(10, 4))
         .show(ui, |ui| {
             ui.label(RichText::new(text).font(medium(12.0)).color(color));
-        });
+        })
+        .response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, text));
+}
+
+/// Input satu baris dengan bingkai inset dan highlight aksen saat fokus.
+pub fn text_field(
+    ui: &mut Ui,
+    id_salt: &str,
+    text: &mut String,
+    width: f32,
+    hint: &str,
+) -> Response {
+    let id = egui::Id::unique(id_salt);
+    let focused = ui.memory(|m| m.has_focus(id));
+    ui.add(
+        egui::TextEdit::singleline(text)
+            .id(id)
+            .desired_width(width)
+            .hint_text(RichText::new(hint).color(MUTED))
+            .frame(
+                Frame::new()
+                    .fill(INPUT)
+                    .stroke(Stroke::new(
+                        1.0,
+                        if focused { ACCENT_BORDER } else { BORDER },
+                    ))
+                    .corner_radius(8)
+                    .inner_margin(Margin::symmetric(11, 8)),
+            ),
+    )
 }
 
 /// Tombol aksi utama amber: teks off-black, hover lebih terang, glow tint saat `glow`.
@@ -403,15 +433,40 @@ pub fn primary(ui: &mut Ui, enabled: bool, glow: bool, text: &str) -> Response {
     response
 }
 
+/// Tombol sekunder; saat `accent` aktif, memakai latar tint amber untuk menonjolkan perubahan.
+pub fn action_button(
+    ui: &mut Ui,
+    enabled: bool,
+    accent: bool,
+    min_width: f32,
+    text: &str,
+) -> Response {
+    ui.scope(|ui| {
+        let fg = if !enabled {
+            MUTED
+        } else if accent {
+            let w = &mut ui.visuals_mut().widgets;
+            w.inactive.bg_fill = ACCENT_TINT;
+            w.hovered.bg_fill = ACCENT_TINT.gamma_multiply(1.6);
+            w.active.bg_fill = ACCENT_TINT.gamma_multiply(2.0);
+            w.inactive.bg_stroke.color = ACCENT_BORDER;
+            ACCENT_HOVER
+        } else {
+            TEXT
+        };
+        interactive(ui, |ui| {
+            ui.add_enabled(
+                enabled,
+                egui::Button::new(RichText::new(text).color(fg)).min_size(vec2(min_width, 34.0)),
+            )
+        })
+    })
+    .inner
+}
+
 /// Tombol sekunder dengan ukuran yang sejajar dengan tombol utama.
 pub fn secondary(ui: &mut Ui, enabled: bool, text: &str) -> Response {
-    interactive(ui, |ui| {
-        ui.add_enabled(
-            enabled,
-            egui::Button::new(RichText::new(text).color(if enabled { TEXT } else { MUTED }))
-                .min_size(vec2(0.0, 34.0)),
-        )
-    })
+    action_button(ui, enabled, false, 0.0, text)
 }
 
 #[cfg(test)]
