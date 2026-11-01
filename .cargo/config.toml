@@ -1,0 +1,6 @@
+# whisper-rs-sys 0.15 membangun whisper.cpp lewat cmake-rs. Dengan MSVC, flag konfigurasi
+# Release dari cmake-rs tidak memuat /O2 sehingga ggml berjalan tanpa optimasi (~10x lebih lambat).
+# build.rs whisper-rs-sys meneruskan variabel CMAKE_* ini ke CMake.
+[env]
+CMAKE_C_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG /MD"
+CMAKE_CXX_FLAGS_RELEASE = "/O2 /Ob2 /DNDEBUG /MD /EHsc"

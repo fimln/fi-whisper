@@ -1,0 +1,358 @@
+//! Konfigurasi lokal `%LOCALAPPDATA%\fi-whisper\config.json`.
+
+use serde::{Deserialize, Serialize};
+use std::fs;
+use std::io::{self, Write};
+use std::path::{Path, PathBuf};
+
+pub const ASR_FILE: &str = "ggml-large-v3-turbo.bin";
+pub const VAD_FILE: &str = "ggml-silero-v6.2.0.bin";
+/// Subfolder `models\` untuk file GGML di atas (sejajar dengan folder Qwen).
+pub const ASR_DIR: &str = "whisper-large-v3-turbo";
+pub const VAD_DIR: &str = "silero-vad-v6.2.0";
+/// Folder checkpoint Transformers `Qwen/Qwen3-ASR-0.6B-hf` (config.json, model.safetensors, tokenizer.json).
+pub const QWEN_DIR: &str = "Qwen3-ASR-0.6B-hf";
+/// Folder checkpoint `Qwen/Qwen3-ASR-1.7B-hf` (layout sama dengan 0.6B-hf).
+pub const QWEN17_DIR: &str = "Qwen3-ASR-1.7B-hf";
+
+/// Mesin ASR. Silero hanya dipakai mesin lokal.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Engine {
+    #[default]
+    #[serde(rename = "whisper")]
+    Whisper,
+    /// Nama serde lama dipertahankan agar config versi sebelumnya tetap terbaca sebagai 0.6B.
+    #[serde(rename = "qwen3-asr")]
+    Qwen3Asr,
+    #[serde(rename = "qwen3-asr-1.7b")]
+    Qwen3Asr17,
+    #[serde(rename = "google-chirp-3")]
+    GoogleChirp3,
+}
+
+impl Engine {
+    pub const ALL: [Self; 4] = [
+        Self::Whisper,
+        Self::Qwen3Asr,
+        Self::Qwen3Asr17,
+        Self::GoogleChirp3,
+    ];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Whisper => "Whisper large-v3-turbo",
+            Self::Qwen3Asr => "Qwen3-ASR 0.6B",
+            Self::Qwen3Asr17 => "Qwen3-ASR 1.7B",
+            Self::GoogleChirp3 => "Google Cloud - Chirp 3",
+        }
+    }
+
+    pub fn short(self) -> &'static str {
+        match self {
+            Self::Whisper => "Whisper",
+            Self::Qwen3Asr => "Qwen3 0.6B",
+            Self::Qwen3Asr17 => "Qwen3 1.7B",
+            Self::GoogleChirp3 => "Chirp 3",
+        }
+    }
+
+    pub fn is_qwen(self) -> bool {
+        matches!(self, Self::Qwen3Asr | Self::Qwen3Asr17)
+    }
+
+    /// Lokasi model bawaan relatif ke `models\` (file untuk Whisper, folder untuk Qwen).
+    pub fn default_name(self) -> &'static str {
+        match self {
+            Self::Whisper => r"whisper-large-v3-turbo\ggml-large-v3-turbo.bin",
+            Self::Qwen3Asr => QWEN_DIR,
+            Self::Qwen3Asr17 => QWEN17_DIR,
+            Self::GoogleChirp3 => "",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Language {
+    #[default]
+    #[serde(rename = "id")]
+    Indonesian,
+    #[serde(rename = "auto")]
+    Auto,
+    #[serde(rename = "en")]
+    English,
+}
+
+impl Language {
+    pub fn chirp_code(self) -> &'static str {
+        match self {
+            Self::English => "en-US",
+            _ => "id-ID",
+        }
+    }
+
+    pub const ALL: [Self; 3] = [Self::Indonesian, Self::Auto, Self::English];
+
+    /// Kode bahasa whisper.cpp; `None` berarti deteksi otomatis (pointer null).
+    pub fn code(self) -> Option<&'static str> {
+        match self {
+            Self::Indonesian => Some("id"),
+            Self::Auto => None,
+            Self::English => Some("en"),
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Indonesian => "Indonesia (id)",
+            Self::Auto => "Auto",
+            Self::English => "English (US)",
+        }
+    }
+
+    /// Nama bahasa untuk prompt Qwen3-ASR (`language Indonesian<asr_text>`); `None` = deteksi.
+    pub fn qwen_name(self) -> Option<&'static str> {
+        match self {
+            Self::Indonesian => Some("Indonesian"),
+            Self::Auto => None,
+            Self::English => Some("English"),
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Config {
+    pub google: GoogleConfig,
+    pub engine: Engine,
+    pub asr_model: Option<PathBuf>,
+    /// Folder model Qwen3-ASR 0.6B.
+    pub qwen_model: Option<PathBuf>,
+    /// Folder model Qwen3-ASR 1.7B.
+    pub qwen17_model: Option<PathBuf>,
+    pub vad_model: Option<PathBuf>,
+    /// ID perangkat CPAL; `None` berarti input default sistem.
+    pub microphone: Option<String>,
+    pub language: Language,
+    pub shortcut: String,
+    /// `true`: tombol close menyembunyikan jendela ke tray. `false`: keluar dari aplikasi.
+    pub close_to_tray: bool,
+    pub auto_startup: bool,
+}
+
+impl Default for Config {
+    fn default() -> Self {
+        Self {
+            google: GoogleConfig::default(),
+            engine: Engine::Whisper,
+            asr_model: None,
+            qwen_model: None,
+            qwen17_model: None,
+            vad_model: None,
+            microphone: None,
+            language: Language::Indonesian,
+            shortcut: "Ctrl+Alt+Space".into(),
+            close_to_tray: true,
+            auto_startup: false,
+        }
+    }
+}
+
+pub fn app_dir() -> Option<PathBuf> {
+    std::env::var_os("LOCALAPPDATA").map(|d| PathBuf::from(d).join("fi-whisper"))
+}
+
+pub fn config_path() -> Option<PathBuf> {
+    app_dir().map(|d| d.join("config.json"))
+}
+
+/// `Ok(None)` jika file belum ada. File rusak dikembalikan sebagai error dan tidak disentuh.
+pub fn load(path: &Path) -> Result<Option<Config>, String> {
+    match fs::read(path) {
+        Ok(bytes) => serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| format!("Konfigurasi rusak ({e}). File tidak diubah.")),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(format!("Konfigurasi tidak dapat dibaca: {e}")),
+    }
+}
+
+/// Tulis ke file sementara di direktori yang sama, lalu ganti file lama.
+pub fn save(path: &Path, config: &Config) -> io::Result<()> {
+    let dir = path.parent().ok_or(io::ErrorKind::InvalidInput)?;
+    fs::create_dir_all(dir)?;
+    let tmp = path.with_extension("json.tmp");
+    let mut file = fs::File::create(&tmp)?;
+    file.write_all(&serde_json::to_vec_pretty(config).map_err(io::Error::other)?)?;
+    file.sync_all()?;
+    drop(file);
+    // std::fs::rename memakai MoveFileExW(MOVEFILE_REPLACE_EXISTING) di Windows.
+    fs::rename(&tmp, path)
+}
+
+/// Lokasi file model GGML bawaan bila konfigurasi belum memilih file:
+/// `models\<dir>\<file>`, lalu `models\<file>` (layout lama).
+pub fn default_model(dir: &str, file: &str) -> Option<PathBuf> {
+    model_candidates(dir)
+        .map(|d| d.join(file))
+        .chain(model_candidates(file))
+        .find(|p| p.is_file())
+}
+
+/// Periksa kelengkapan checkpoint, mengikuti prioritas indeks shard pada loader.
+pub fn validate_qwen_dir(dir: &Path) -> Result<(), String> {
+    for file in ["config.json", "tokenizer.json"] {
+        if !dir.join(file).is_file() {
+            return Err(format!("{file} tidak ditemukan"));
+        }
+    }
+    let index = dir.join("model.safetensors.index.json");
+    if index.is_file() {
+        let bytes = fs::read(index).map_err(|e| format!("Indeks shard tidak dapat dibaca: {e}"))?;
+        let index: serde_json::Value =
+            serde_json::from_slice(&bytes).map_err(|e| format!("Indeks shard rusak: {e}"))?;
+        let weights = index["weight_map"]
+            .as_object()
+            .filter(|m| !m.is_empty())
+            .ok_or("Indeks shard tidak berisi weight_map")?;
+        for value in weights.values() {
+            let shard = value
+                .as_str()
+                .filter(|s| !s.is_empty())
+                .ok_or("Nama shard tidak valid")?;
+            if !dir.join(shard).is_file() {
+                return Err(format!("Shard {shard} tidak ditemukan"));
+            }
+        }
+    } else if !dir.join("model.safetensors").is_file() {
+        return Err("model.safetensors atau indeks shard tidak ditemukan".into());
+    }
+    Ok(())
+}
+
+/// Lokasi folder checkpoint Qwen3-ASR bawaan yang lengkap.
+pub fn default_model_dir(dir: &str) -> Option<PathBuf> {
+    model_candidates(dir).find(|p| validate_qwen_dir(p).is_ok())
+}
+
+fn model_candidates(name: &str) -> impl Iterator<Item = PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(dir) = app_dir() {
+        candidates.push(dir.join("models").join(name));
+    }
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_owned))
+    {
+        candidates.push(dir.join("models").join(name));
+    }
+    if let Ok(dir) = std::env::current_dir() {
+        candidates.push(dir.join("models").join(name));
+    }
+    candidates.into_iter()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn qwen_requires_complete_single_or_sharded_checkpoint() {
+        let dir = std::env::temp_dir().join(format!("fi-whisper-qwen-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        assert!(validate_qwen_dir(&dir).is_err());
+        fs::write(dir.join("config.json"), b"{}").unwrap();
+        assert!(validate_qwen_dir(&dir).is_err());
+        fs::write(dir.join("tokenizer.json"), b"{}").unwrap();
+        assert!(validate_qwen_dir(&dir).is_err());
+        fs::write(dir.join("model.safetensors"), b"weights").unwrap();
+        assert!(validate_qwen_dir(&dir).is_ok());
+        let index = dir.join("model.safetensors.index.json");
+        fs::write(
+            &index,
+            br#"{"weight_map":{"a":"first.safetensors","b":"second.safetensors"}}"#,
+        )
+        .unwrap();
+        // Indeks mengalahkan file tunggal, sama seperti loader.
+        assert!(validate_qwen_dir(&dir).is_err());
+        fs::remove_file(dir.join("model.safetensors")).unwrap();
+        fs::write(dir.join("first.safetensors"), b"a").unwrap();
+        assert!(validate_qwen_dir(&dir).is_err());
+        fs::write(dir.join("second.safetensors"), b"b").unwrap();
+        assert!(validate_qwen_dir(&dir).is_ok());
+        for invalid in [
+            "invalid",
+            "{}",
+            r#"{"weight_map":{}}"#,
+            r#"{"weight_map":{"a":42}}"#,
+        ] {
+            fs::write(&index, invalid).unwrap();
+            assert!(validate_qwen_dir(&dir).is_err());
+        }
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn save_load_roundtrip_and_corrupt_file_is_preserved() {
+        let dir = std::env::temp_dir().join(format!("fi-whisper-test-{}", std::process::id()));
+        let path = dir.join("config.json");
+        let config = Config {
+            asr_model: Some(PathBuf::from(r"C:\Model ü\a.bin")),
+            language: Language::Auto,
+            ..Config::default()
+        };
+        save(&path, &config).unwrap();
+        assert_eq!(load(&path).unwrap(), Some(config));
+
+        fs::write(&path, b"{ rusak").unwrap();
+        assert!(load(&path).is_err());
+        assert_eq!(fs::read(&path).unwrap(), b"{ rusak");
+        assert_eq!(load(&dir.join("tidak-ada.json")).unwrap(), None);
+        fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn missing_fields_use_defaults() {
+        let config: Config = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
+        assert_eq!(config.language, Language::English);
+        assert_eq!(config.engine, Engine::Whisper);
+        let config: Config = serde_json::from_str(r#"{"engine":"qwen3-asr"}"#).unwrap();
+        assert_eq!(config.engine, Engine::Qwen3Asr);
+        let config: Config = serde_json::from_str(r#"{"engine":"qwen3-asr-1.7b"}"#).unwrap();
+        assert_eq!(config.engine, Engine::Qwen3Asr17);
+        assert_eq!(config.shortcut, "Ctrl+Alt+Space");
+        assert!(config.close_to_tray);
+        assert!(!config.auto_startup);
+        // Field lama dari versi sebelumnya diabaikan.
+        let config: Config = serde_json::from_str(r#"{"close_hint_shown":true}"#).unwrap();
+        assert!(config.close_to_tray);
+        assert!(!config.auto_startup);
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct GoogleConfig {
+    pub project: String,
+    pub region: String,
+    pub monthly_limit_minutes: u32,
+}
+impl Default for GoogleConfig {
+    fn default() -> Self {
+        Self {
+            project: String::new(),
+            region: "us".into(),
+            monthly_limit_minutes: 600,
+        }
+    }
+}
+
+#[cfg(test)]
+mod language_tests {
+    use super::Language;
+    #[test]
+    fn chirp_language_codes() {
+        assert_eq!(Language::English.chirp_code(), "en-US");
+        assert_eq!(Language::Indonesian.chirp_code(), "id-ID");
+        assert_eq!(Language::Auto.chirp_code(), "id-ID");
+    }
+}
