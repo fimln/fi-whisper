@@ -361,6 +361,7 @@ impl App {
                     animated[1] as u8,
                     animated[2] as u8,
                 );
+                status_badge(ui, phase_label(phase, english), color, background);
 
                 {
                     let engine = loaded.unwrap_or(self.engine);
@@ -377,7 +378,13 @@ impl App {
                         .x
                         + 28.0;
                     if ui.available_width() >= width {
-                        status_badge(ui, &text, color, background);
+                        let badge_color =
+                            if engine != Engine::GoogleChirp3 && backend.starts_with("CPU") {
+                                WARN
+                            } else {
+                                SECONDARY
+                            };
+                        status_badge(ui, &text, badge_color, badge_color);
                     }
                 }
             });
@@ -421,6 +428,7 @@ impl App {
                 }
             });
         });
+        ui.add_space(4.0);
         ui.horizontal(|ui| {
             ui.label(
                 RichText::new(format!(
@@ -439,13 +447,14 @@ impl App {
                 });
             }
         });
+        ui.add_space(2.0);
         meter(
             ui,
             recording,
             matches!(phase, Phase::Loading | Phase::Transcribing),
             self.level,
         );
-        ui.add_space(4.0);
+        ui.add_space(6.0);
         ui.horizontal(|ui| {
             let (enabled, label) = match phase {
                 Phase::Recording => (true, t("Selesai", "Done")),
@@ -515,11 +524,11 @@ impl App {
                 ui.set_width(ui.available_width());
                 egui::ScrollArea::vertical()
                     .id_salt("result")
-                    .min_scrolled_height(120.0)
-                    .max_height(120.0)
+                    .min_scrolled_height(110.0)
+                    .max_height(110.0)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.set_min_height(120.0);
+                        ui.set_min_height(110.0);
                         if result.is_empty() {
                             ui.label(
                                 RichText::new(t(
@@ -537,6 +546,11 @@ impl App {
                         }
                     });
             });
+        let status = match (result.is_empty(), result_note.as_str()) {
+            (false, COPIED) => Some(t(COPIED, "Copied to clipboard.")),
+            (false, "") => Some(t("Selesai", "Done")),
+            _ => None,
+        };
         let mut copy_note = None;
         ui.horizontal(|ui| {
             let copy_flash = flash_amount(ui, self.copy_flash, 0.5);
@@ -564,6 +578,55 @@ impl App {
             if secondary(ui, !result.is_empty(), t("Hapus", "Clear")).clicked() {
                 self.core.send(Cmd::ClearResult);
             }
+            if status.is_some() || timing.is_some() {
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    let text_width = |ui: &Ui, s: &str, color| {
+                        ui.painter()
+                            .layout_no_wrap(s.to_owned(), egui::FontId::proportional(12.0), color)
+                            .size()
+                            .x
+                    };
+                    let status_reserve = match status {
+                        Some(s) if result_note == COPIED => {
+                            text_width(ui, s, SUCCESS) + ui.spacing().item_spacing.x
+                        }
+                        _ => 0.0,
+                    };
+                    if let Some((tm, total)) = timing {
+                        let full = format!(
+                            "{:.1} s audio, {:.2} s {}",
+                            tm.audio.as_secs_f32(),
+                            total.as_secs_f32(),
+                            t("proses", "processing")
+                        );
+                        let avail = ui.available_width() - status_reserve;
+                        let label = if avail >= text_width(ui, &full, SECONDARY) {
+                            Some(full)
+                        } else {
+                            let short = format!(
+                                "{:.1} s, {:.2} s {}",
+                                tm.audio.as_secs_f32(),
+                                total.as_secs_f32(),
+                                t("proses", "proc")
+                            );
+                            (avail >= text_width(ui, &short, SECONDARY)).then_some(short)
+                        };
+                        if let Some(label) = label {
+                            ui.label(RichText::new(label).small().color(SECONDARY))
+                                .on_hover_text(format!(
+                                    "VAD {:.2} s, ASR {:.2} s",
+                                    tm.vad.as_secs_f32(),
+                                    tm.asr.as_secs_f32()
+                                ));
+                        }
+                    }
+                    if let Some(text) = status
+                        && ui.available_width() >= text_width(ui, text, SUCCESS)
+                    {
+                        ui.label(RichText::new(text).small().color(SUCCESS));
+                    }
+                });
+            }
         });
         if !result_note.is_empty() && result_note != COPIED {
             ui.label(
@@ -571,35 +634,6 @@ impl App {
                     .small()
                     .color(WARN),
             );
-        }
-        // Baris sendiri (wrap) agar tidak bertabrakan dengan judul/tombol saat kolom sempit.
-        let status = match (result.is_empty(), result_note.as_str()) {
-            (false, COPIED) => Some(t(COPIED, "Copied to clipboard.")),
-            (false, "") => Some(t("Selesai", "Done")),
-            _ => None,
-        };
-        if status.is_some() || timing.is_some() {
-            ui.horizontal_wrapped(|ui| {
-                if let Some(text) = status {
-                    ui.label(RichText::new(text).small().color(SUCCESS));
-                }
-                if let Some((t, total)) = timing {
-                    ui.label(
-                        RichText::new(format!(
-                            "{:.1} s audio, {:.2} s processing",
-                            t.audio.as_secs_f32(),
-                            total.as_secs_f32()
-                        ))
-                        .small()
-                        .color(SECONDARY),
-                    )
-                    .on_hover_text(format!(
-                        "VAD {:.2} s, ASR {:.2} s",
-                        t.vad.as_secs_f32(),
-                        t.asr.as_secs_f32()
-                    ));
-                }
-            });
         }
         if let Some(note) = copy_note {
             self.core.status().result_note = note;
@@ -683,26 +717,27 @@ impl App {
             }
             field_label(ui, "Shortcut");
             ui.horizontal(|ui| {
-                let id = egui::Id::unique("shortcut-input");
-                let focused = ui.memory(|m| m.has_focus(id));
-                let response = ui.add(
-                    egui::TextEdit::singleline(&mut self.shortcut_input)
-                        .id(id)
-                        .desired_width(ui.available_width() - 104.0)
-                        .hint_text(RichText::new("Ctrl+Alt+Space").color(MUTED))
-                        .frame(
-                            egui::Frame::new()
-                                .fill(INPUT)
-                                .stroke(egui::Stroke::new(
-                                    1.0,
-                                    if focused { ACCENT_BORDER } else { BORDER },
-                                ))
-                                .corner_radius(8)
-                                .inner_margin(egui::Margin::symmetric(11, 8)),
-                        ),
+                let response = text_field(
+                    ui,
+                    "shortcut-input",
+                    &mut self.shortcut_input,
+                    ui.available_width() - 104.0,
+                    "Ctrl+Alt+Space",
                 );
+                let trimmed = self.shortcut_input.trim();
+                let dirty = !trimmed.is_empty()
+                    && (self.shortcut() != Some(trimmed) || !self.shortcut_error.is_empty());
                 let enter = response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
-                if secondary(ui, true, t("Terapkan", "Apply")).clicked() || enter {
+                if action_button(
+                    ui,
+                    dirty,
+                    dirty,
+                    ui.available_width(),
+                    t("Terapkan", "Apply"),
+                )
+                .clicked()
+                    || (enter && !trimmed.is_empty())
+                {
                     self.apply_shortcut();
                 }
             });
@@ -865,22 +900,18 @@ impl App {
             });
             ui.add_space(2.0);
             ui.horizontal(|ui| {
-                let button = if same {
-                    egui::Button::new(t("Muat ulang", "Reload"))
+                let label = if same {
+                    t("Muat ulang", "Reload")
                 } else {
-                    // Pilihan berbeda dari model aktif: tonjolkan aksi yang perlu dilakukan.
-                    let w = &mut ui.visuals_mut().widgets;
-                    w.inactive.bg_fill = ACCENT_TINT;
-                    w.hovered.bg_fill = ACCENT_TINT.gamma_multiply(1.6);
-                    w.active.bg_fill = ACCENT_TINT.gamma_multiply(2.0);
-                    w.inactive.bg_stroke.color = ACCENT_BORDER;
-                    egui::Button::new(
-                        RichText::new(t("Muat model", "Load model")).color(ACCENT_HOVER),
-                    )
+                    t("Muat model", "Load model")
                 };
-                if interactive(ui, |ui| {
-                    ui.add_enabled(selected.is_some() && self.vad.is_some(), button)
-                })
+                if action_button(
+                    ui,
+                    selected.is_some() && self.vad.is_some(),
+                    !same,
+                    0.0,
+                    label,
+                )
                 .clicked()
                     && let (Some(asr), Some(vad)) = (selected.clone(), self.vad.clone())
                 {
@@ -900,20 +931,20 @@ impl App {
                         vad,
                     });
                 }
+                if phase == Phase::Loading {
+                    ui.label(RichText::new("Memuat…").small().color(SECONDARY));
+                } else if let (true, Some(t)) = (same, load_time) {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} {:.1} s",
+                            if english { "Loaded in" } else { "Dimuat" },
+                            t.as_secs_f32()
+                        ))
+                        .small()
+                        .color(SECONDARY),
+                    );
+                }
             });
-            if phase == Phase::Loading {
-                ui.label(RichText::new("Memuat…").small().color(SECONDARY));
-            } else if let (true, Some(t)) = (same, load_time) {
-                ui.label(
-                    RichText::new(format!(
-                        "{} {:.1} s",
-                        if english { "Loaded in" } else { "Dimuat" },
-                        t.as_secs_f32()
-                    ))
-                    .small()
-                    .color(SECONDARY),
-                );
-            }
         });
         if !diagnostics.is_empty() {
             interactive(ui, |ui| {
@@ -946,25 +977,50 @@ impl App {
         let english = self.config.language == Language::English;
         let t = |id, en| if english { en } else { id };
         field_label(ui, "Project ID");
-        let mut changed = ui
-            .text_edit_singleline(&mut self.config.google.project)
-            .changed();
-        ui.horizontal(|ui| {
-            ui.label("Region");
-            for region in ["us", "eu"] {
-                changed |= ui
-                    .selectable_value(&mut self.config.google.region, region.into(), region)
-                    .changed();
-            }
-        });
-        ui.horizontal(|ui| {
-            ui.label(t("Batas menit / bulan", "Minutes per month"));
-            changed |= ui
-                .add(
-                    egui::DragValue::new(&mut self.config.google.monthly_limit_minutes)
-                        .range(0..=60000),
-                )
+        let mut changed = text_field(
+            ui,
+            "cloud-project",
+            &mut self.config.google.project,
+            ui.available_width(),
+            "my-gcp-project-id",
+        )
+        .changed();
+        ui.columns_const(|[l, r]: &mut [Ui; 2]| {
+            l.with_layout(Layout::top_down(Align::Min), |ui| {
+                field_label(ui, "Region");
+                let width = ui.available_width();
+                combo(
+                    ui,
+                    egui::ComboBox::from_id_salt("cloud-region")
+                        .width(width)
+                        .selected_text(&self.config.google.region),
+                    |ui| {
+                        for region in ["us", "eu"] {
+                            changed |= interactive(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut self.config.google.region,
+                                    region.into(),
+                                    region,
+                                )
+                            })
+                            .changed();
+                        }
+                    },
+                );
+            });
+            r.with_layout(Layout::top_down(Align::Min), |ui| {
+                field_label(ui, t("Batas / bulan", "Monthly limit"));
+                let width = ui.available_width();
+                changed |= interactive(ui, |ui| {
+                    ui.add_sized(
+                        [width, 34.0],
+                        egui::DragValue::new(&mut self.config.google.monthly_limit_minutes)
+                            .range(0..=60000)
+                            .suffix(t(" menit", " min")),
+                    )
+                })
                 .changed();
+            });
         });
         if changed {
             self.save_config();
@@ -979,6 +1035,7 @@ impl App {
                 cloud::usage_seconds(&self.config.google.project),
             ));
         }
+        ui.add_space(2.0);
         match self.cloud_usage.as_ref().unwrap().2.clone() {
             Ok(seconds) => {
                 let minutes = seconds as f64 / 60.0;
@@ -1004,11 +1061,45 @@ impl App {
                 ui.label(RichText::new(e).small().color(DANGER));
             }
         }
-        ui.collapsing("Setup ADC", |ui| {
-            ui.label(t("Jalankan di terminal, lalu mulai dikte:", "Run in a terminal, then start dictation:"));
-            ui.monospace("gcloud auth application-default login");
-            ui.monospace(format!("gcloud auth application-default set-quota-project {}", self.config.google.project));
-            ui.label(t("Penghitung lokal bukan tagihan Google. Bulan mengikuti UTC. Sisa minimal 2 menit untuk memulai sesi.", "Local counter, not your Google bill. Months use UTC. At least 2 minutes must remain to start a session."));
+        interactive(ui, |ui| {
+            egui::CollapsingHeader::new(RichText::new("Setup ADC").small().color(SECONDARY))
+                .id_salt("setup-adc")
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(t(
+                            "Jalankan di terminal, lalu mulai dikte:",
+                            "Run in a terminal, then start dictation:",
+                        ))
+                        .small()
+                        .color(SECONDARY),
+                    );
+                    let project = if self.config.google.project.trim().is_empty() {
+                        "PROJECT_ID"
+                    } else {
+                        self.config.google.project.trim()
+                    };
+                    let cmd = format!(
+                        "gcloud auth application-default login\ngcloud auth application-default set-quota-project {project}"
+                    );
+                    inset(false).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(cmd).monospace().size(11.5).color(TEXT),
+                            )
+                            .selectable(true),
+                        );
+                    });
+                    ui.label(
+                        RichText::new(t(
+                            "Penghitung lokal bukan tagihan Google. Bulan mengikuti UTC. Sisa minimal 2 menit untuk memulai sesi.",
+                            "Local counter, not your Google bill. Months use UTC. At least 2 minutes must remain to start a session.",
+                        ))
+                        .small()
+                        .color(SECONDARY),
+                    );
+                })
+                .header_response
         });
     }
 
@@ -1091,6 +1182,7 @@ impl App {
         });
         if heights != previous {
             self.rows[index] = heights;
+            ui.ctx().request_discard("row height");
             ui.ctx().request_repaint();
         }
     }
@@ -1116,6 +1208,18 @@ fn phase_color(phase: Phase) -> egui::Color32 {
     }
 }
 
+fn phase_label(phase: Phase, english: bool) -> &'static str {
+    let t = |id, en| if english { en } else { id };
+    match phase {
+        Phase::CloudIdle | Phase::Ready => t("Siap", "Ready"),
+        Phase::Recording => t("Merekam", "Recording"),
+        Phase::Loading => t("Memuat", "Loading"),
+        Phase::Transcribing => t("Memproses", "Processing"),
+        Phase::MissingModel => t("Belum siap", "Not ready"),
+        Phase::Error => t("Galat", "Error"),
+    }
+}
+
 /// Shortcut ditampilkan sebagai keycap.
 fn keycap(ui: &mut Ui, text: &str) {
     egui::Frame::new()
@@ -1125,7 +1229,9 @@ fn keycap(ui: &mut Ui, text: &str) {
         .inner_margin(egui::Margin::symmetric(8, 3))
         .show(ui, |ui| {
             ui.label(RichText::new(text).monospace().size(11.5).color(SECONDARY));
-        });
+        })
+        .response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Keyboard, true, text));
 }
 
 /// Indikator rekaman live (merah berdenyut), terpisah dari tombol utama.
@@ -1160,17 +1266,33 @@ fn flash_amount(ui: &Ui, started: Option<std::time::Instant>, duration: f32) -> 
 }
 
 fn meter(ui: &mut Ui, active: bool, busy: bool, level: f32) {
-    let (rect, _) = ui.allocate_exact_size(vec2(ui.available_width(), 36.0), egui::Sense::hover());
+    let (rect, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 36.0), egui::Sense::hover());
+    let fraction = meter_fraction(level);
+    response.widget_info(|| {
+        let mut info = egui::WidgetInfo::new(egui::Role::Meter);
+        info.label = Some("Level audio".into());
+        info.value = Some((fraction * 100.0).round().into());
+        info
+    });
     let count = ((rect.width() / 6.0) as usize).max(8);
     let step = rect.width() / count as f32;
-    let filled = (meter_fraction(level) * count as f32) as usize;
+    let exact = fraction * count as f32;
+    let filled = exact.ceil() as usize;
     let t = ui.input(|i| i.time) as f32;
     for i in 0..count {
         let on = active && i < filled;
+        let edge = (exact - i as f32).clamp(0.0, 1.0);
         let processing = busy && ((i as f32 - (t * 12.0) % (count as f32 + 8.0) + 8.0).abs() < 3.0);
-        // Tinggi bar bervariasi agar terbaca sebagai gelombang suara, bukan progress bar.
+        // Tinggi bar bervariasi mengikuti dinamika suara dan meluruh halus di batang ujung.
         let wave = 0.55 + 0.45 * ((i as f32 * 0.9 + t * 7.0).sin() * 0.5 + 0.5);
-        let height = if on { 8.0 + 24.0 * wave } else { 4.0 };
+        let height = if on {
+            6.0 + 26.0 * wave * (0.35 + 0.65 * fraction) * edge
+        } else if processing {
+            10.0
+        } else {
+            4.0
+        };
         let bar = egui::Rect::from_center_size(
             egui::pos2(rect.left() + (i as f32 + 0.5) * step, rect.center().y),
             vec2((step - 3.0).max(1.0), height),
@@ -1267,7 +1389,12 @@ fn model_field(
             }
             None => {}
         }
-        if secondary(ui, true, t("Pilih", "Browse")).clicked() {
+        let pick_btn = action_button(ui, true, false, ui.available_width(), t("Pilih", "Browse"));
+        let a11y_label = format!("{} {label}", t("Pilih", "Browse"));
+        pick_btn.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &a11y_label)
+        });
+        if pick_btn.clicked() {
             let dialog =
                 rfd::FileDialog::new().set_title(format!("{} {label}", t("Pilih", "Select")));
             let selected = match pick {
@@ -1347,14 +1474,20 @@ impl eframe::App for App {
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
         egui::Panel::top("header")
             .resizable(false)
-            .frame(
-                egui::Frame::new()
-                    .fill(BG)
-                    .inner_margin(egui::Margin::symmetric(16, 12)),
-            )
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin {
+                left: 16,
+                right: 16,
+                top: 12,
+                bottom: 10,
+            }))
             .show(root, |ui| self.header(ui));
         egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(16))
+            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin {
+                left: 16,
+                right: 16,
+                top: 12,
+                bottom: 16,
+            }))
             .show(root, |ui| {
                 let available = ui.available_height();
                 // Cadangan bila jendela diperkecil atau pesan error panjang membuat isi melebihi tinggi.
@@ -1367,7 +1500,9 @@ impl eframe::App for App {
                 scroll.active_handle_opacity = 0.18;
                 scroll.interact_handle_opacity = 0.30;
                 egui::ScrollArea::vertical()
-                    .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
+                    .scroll_bar_visibility(
+                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
+                    )
                     .show(ui, |ui| {
                         ui.set_style(style);
                         ui.set_width(ui.available_width());
@@ -1376,16 +1511,23 @@ impl eframe::App for App {
                         }
                         self.row(ui, 0, Self::dictation_card, Self::result_card);
                         self.row(ui, 1, Self::input_card, Self::model_card);
-                        // Koreksi linear dari frame ini; stabil setelah satu frame tambahan.
+                        // Koreksi linear dari frame ini; stabil setelah satu pass tambahan.
                         // Dibulatkan ke bawah agar pembulatan piksel tidak memunculkan scrollbar.
                         let used = ui.min_rect().height();
                         let extra = (self.extra + available - used - 1.0).max(0.0).floor();
                         if (extra - self.extra).abs() >= 1.0 {
                             self.extra = extra;
+                            ui.ctx().request_discard("extra height");
                             ui.ctx().request_repaint();
                         }
                     });
             });
+        root.painter().rect_stroke(
+            root.ctx().content_rect(),
+            0.0,
+            egui::Stroke::new(1.0, BORDER),
+            egui::StrokeKind::Inside,
+        );
         resize_edges(root);
     }
 }

@@ -175,8 +175,11 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Even
                 let started = Instant::now();
                 take_log();
                 // Lepas VRAM sebelum alokasi model baru, termasuk saat muat ulang.
-                drop(models.take());
+                let had_models = models.take().is_some();
                 if engine == Engine::GoogleChirp3 {
+                    if had_models {
+                        reset_cuda_device();
+                    }
                     events(Event::Loaded {
                         engine,
                         asr,
@@ -202,7 +205,10 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Even
                             took: started.elapsed(),
                         });
                     }
-                    Err(e) => events(Event::LoadFailed(e)),
+                    Err(e) => {
+                        reset_cuda_device();
+                        events(Event::LoadFailed(e));
+                    }
                 }
             }
             Job::Transcribe {
@@ -234,6 +240,20 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Even
                 let _ = release.recv();
             }
         }
+    }
+    if models.take().is_some() {
+        reset_cuda_device();
+    }
+}
+
+/// Hancurkan primary context CUDA setelah semua handle model di-drop agar proses keluar dari daftar aktif GPU.
+fn reset_cuda_device() {
+    #[cfg(feature = "cuda")]
+    unsafe {
+        unsafe extern "C" {
+            fn cudaDeviceReset() -> i32;
+        }
+        let _ = cudaDeviceReset();
     }
 }
 
@@ -299,9 +319,15 @@ fn load_qwen(dir: &Path) -> Result<(qwen3_asr::AsrInference, String), String> {
     #[cfg(feature = "qwen-cuda")]
     let cpu_note = match std::panic::catch_unwind(|| load_qwen_cuda(dir)) {
         Ok(Ok(model)) => return Ok((model, "GPU CUDA0".into())),
-        Ok(Err(e)) => format!("CPU, CUDA gagal: {}", short_error(&e)),
+        Ok(Err(e)) => {
+            reset_cuda_device();
+            format!("CPU, CUDA gagal: {}", short_error(&e))
+        }
         // cudarc panik bila DLL NVRTC/cuRAND/cuBLAS tidak ditemukan.
-        Err(_) => "CPU, runtime CUDA tidak lengkap".into(),
+        Err(_) => {
+            reset_cuda_device();
+            "CPU, runtime CUDA tidak lengkap".into()
+        }
     };
     #[cfg(not(feature = "qwen-cuda"))]
     let cpu_note = "CPU".to_owned();
@@ -879,5 +905,29 @@ mod tests {
             matches!(outcome, Outcome::NoSpeech),
             "synthetic noise produced text"
         );
+        worker
+            .send(Job::Load {
+                engine: Engine::GoogleChirp3,
+                asr: PathBuf::new(),
+                vad: PathBuf::new(),
+            })
+            .unwrap();
+        assert!(matches!(
+            rx.recv_timeout(Duration::from_secs(30))
+                .expect("worker deadline"),
+            Event::Loaded {
+                engine: Engine::GoogleChirp3,
+                ..
+            }
+        ));
+        #[cfg(feature = "cuda")]
+        unsafe {
+            unsafe extern "C" {
+                fn cuDevicePrimaryCtxGetState(dev: i32, flags: *mut u32, active: *mut i32) -> i32;
+            }
+            let (mut flags, mut active) = (0, 1);
+            assert_eq!(cuDevicePrimaryCtxGetState(0, &mut flags, &mut active), 0);
+            assert_eq!(active, 0, "primary context CUDA masih aktif");
+        }
     }
 }

@@ -331,11 +331,6 @@ impl Controller {
                 st.error.clear();
                 st.note.clear();
                 drop(st);
-                if engine == Engine::GoogleChirp3 {
-                    // Akhiri thread lokal agar cache CUDA thread-local ikut dilepas.
-                    self.worker_gen += 1;
-                    self.worker = spawn_worker(&self.tx, self.worker_gen);
-                }
                 self.send_job(Job::Load { engine, asr, vad });
             }
             Cmd::Settings { mic, language } => {
