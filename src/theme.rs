@@ -87,10 +87,10 @@ pub fn combo(ui: &mut Ui, combo: egui::ComboBox, add: impl FnOnce(&mut Ui)) -> R
 }
 
 // Fondasi
-pub const BG: Color32 = Color32::from_rgb(0x0F, 0x0E, 0x0C);
-pub const SURFACE: Color32 = Color32::from_rgb(0x18, 0x16, 0x13);
-pub const RAISED: Color32 = Color32::from_rgb(0x22, 0x1F, 0x1B);
-pub const BORDER: Color32 = Color32::from_rgb(0x2E, 0x2A, 0x24);
+pub const BG: Color32 = Color32::from_rgb(0x09, 0x08, 0x07);
+pub const SURFACE: Color32 = Color32::from_rgb(0x12, 0x10, 0x0E);
+pub const RAISED: Color32 = Color32::from_rgb(0x1C, 0x19, 0x16);
+pub const BORDER: Color32 = Color32::from_rgb(0x28, 0x24, 0x1F);
 /// Area inset (hasil, input) memakai warna background agar tampak "masuk" ke dalam card.
 pub const INPUT: Color32 = BG;
 // Aksen
@@ -300,7 +300,7 @@ pub fn install(ctx: &egui::Context) {
             (&mut v.widgets.hovered, BORDER, ACCENT_BORDER, TEXT),
             (
                 &mut v.widgets.active,
-                Color32::from_rgb(0x38, 0x33, 0x2C),
+                Color32::from_rgb(0x32, 0x2E, 0x28),
                 ACCENT_BORDER,
                 TEXT,
             ),
