@@ -16,7 +16,7 @@ use windows_sys::Win32::Graphics::Dwm::{
 };
 use windows_sys::Win32::Graphics::Gdi::{
     GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
-    MonitorFromWindow,
+    MonitorFromRect, MonitorFromWindow,
 };
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -83,16 +83,18 @@ unsafe extern "system" fn window_frame(
     unsafe {
         if msg == WM_NCCALCSIZE && w != 0 {
             if IsZoomed(hwnd) != 0 {
+                let params = &mut *(l as *mut NCCALCSIZE_PARAMS);
                 let mut monitor = MONITORINFO {
                     cbSize: std::mem::size_of::<MONITORINFO>() as u32,
                     ..Default::default()
                 };
+                // During a monitor move, the proposed rect precedes the HWND's monitor update.
                 if GetMonitorInfoW(
-                    MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                    MonitorFromRect(&params.rgrc[0], MONITOR_DEFAULTTONEAREST),
                     &mut monitor,
                 ) != 0
                 {
-                    (*(l as *mut NCCALCSIZE_PARAMS)).rgrc[0] = monitor.rcWork;
+                    params.rgrc[0] = monitor.rcWork;
                 } else {
                     return DefSubclassProc(hwnd, msg, w, l);
                 }
