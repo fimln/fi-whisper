@@ -9,16 +9,16 @@ use std::sync::atomic::Ordering;
 fn choose(
     s: &App,
     key: &str,
-    current: &str,
+    current: Option<usize>,
     options: &[String],
     enabled: bool,
     layers: &mut Vec<El>,
-    f: impl Fn(&mut App, &str) + Clone + 'static,
+    f: impl Fn(&mut App, usize) + Clone + 'static,
 ) -> El {
     let key = key.to_owned();
     let toggle_key = key.clone();
     let trigger = Select::new(&key, options)
-        .current(Some(current))
+        .current(current.and_then(|i| options.get(i)).map(String::as_str))
         .label(&key)
         .width(280.0)
         .appearance(SelectAppearance::Field)
@@ -42,14 +42,14 @@ fn choose(
         let anchor = format!("{key}-trigger");
         let mut rows = col().key("rows").gap(2.0).padding(4.0).w_full();
         for (i, option) in options.iter().enumerate() {
-            let (value, choose) = (option.clone(), f.clone());
+            let choose = f.clone();
             rows = rows.child(
                 row()
                     .key(format!("option{i}"))
                     .role("option")
                     .label(option.clone())
                     .focusable(true)
-                    .focus_selected(option == current)
+                    .focus_selected(current == Some(i))
                     .position_in_set(i + 1, options.len())
                     .w_full()
                     .min_h(32.0)
@@ -73,10 +73,10 @@ fn choose(
                     .child(
                         rune::icon(k.glyph.check_small, 14.0)
                             .color(k.c.icon_base)
-                            .opacity(if option == current { 1.0 } else { 0.0 }),
+                            .opacity(if current == Some(i) { 1.0 } else { 0.0 }),
                     )
                     .on_press(move |s: &mut App| {
-                        choose(s, &value);
+                        choose(s, i);
                         s.menu = None;
                     }),
             );
@@ -209,7 +209,7 @@ fn header(s: &App, width: f32) -> El {
         }),
     )
 }
-fn dictation(s: &App) -> El {
+fn dictation(s: &App, reduced: bool) -> El {
     let st = s.core.status();
     let phase = st.phase;
     let recording = phase == Phase::Recording;
@@ -235,8 +235,9 @@ fn dictation(s: &App) -> El {
         let exact = fraction * 32.0;
         let on = recording && (i as f32) < exact;
         let edge = (exact - i as f32).clamp(0.0, 1.0);
-        let processing = busy && ((i as f32 - (s.now as f32 * 12.0) % 40.0 + 8.0).abs() < 3.0);
-        let wave = 0.55 + 0.45 * ((i as f32 * 0.9 + s.now as f32 * 7.0).sin() * 0.5 + 0.5);
+        let now = if reduced { 0.0 } else { s.now as f32 };
+        let processing = busy && ((i as f32 - now * 12.0 % 40.0 + 8.0).abs() < 3.0);
+        let wave = 0.55 + 0.45 * ((i as f32 * 0.9 + now * 7.0).sin() * 0.5 + 0.5);
         let height = if on {
             6.0 + 26.0 * wave * (0.35 + 0.65 * fraction) * edge
         } else if processing {
@@ -395,17 +396,23 @@ fn settings(s: &App, layers: &mut Vec<El>) -> El {
         .config
         .microphone
         .as_ref()
-        .and_then(|id| s.mics.iter().find(|m| &m.id == id))
-        .map_or(microphones[0].as_str(), |m| m.name.as_str());
+        .and_then(|id| s.mics.iter().position(|m| &m.id == id))
+        .map_or(0, |i| i + 1);
     let mic = choose(
         s,
         "microphone",
-        selected,
+        Some(selected),
         &microphones,
         idle,
         layers,
-        |s, v| {
-            s.config.microphone = s.mics.iter().find(|m| m.name == v).map(|m| m.id.clone());
+        |s, i| {
+            if s.core.status().phase.busy() {
+                return;
+            }
+            s.config.microphone = i
+                .checked_sub(1)
+                .and_then(|i| s.mics.get(i))
+                .map(|m| m.id.clone());
             s.save_config();
             s.push_settings();
         },
@@ -414,12 +421,15 @@ fn settings(s: &App, layers: &mut Vec<El>) -> El {
     let language = choose(
         s,
         "language",
-        s.config.language.label(),
+        Language::ALL.iter().position(|x| *x == s.config.language),
         &languages,
         idle,
         layers,
-        |s, v| {
-            if let Some(x) = Language::ALL.into_iter().find(|x| x.label() == v) {
+        |s, i| {
+            if s.core.status().phase.busy() {
+                return;
+            }
+            if let Some(&x) = Language::ALL.get(i) {
                 s.config.language = x;
                 s.save_config();
                 s.push_settings();
@@ -440,16 +450,14 @@ fn settings(s: &App, layers: &mut Vec<El>) -> El {
     } else {
         usize::from(s.config.close_to_tray)
     };
-    let copy = close_options.clone();
     let close = choose(
         s,
         "close-action",
-        &close_options[selected],
+        Some(selected),
         &close_options,
         true,
         layers,
-        move |s, v| {
-            let index = copy.iter().position(|x| x == v).unwrap_or(0);
+        move |s, index| {
             if index > 0 && s.tray.is_none() {
                 return;
             }
@@ -526,17 +534,20 @@ fn pick_model(s: &mut App, vad: bool) {
         s.refresh_models();
     }
 }
-fn cloud(s: &App, layers: &mut Vec<El>) -> El {
+fn cloud(s: &App, layers: &mut Vec<El>, idle: bool) -> El {
     let regions = ["us".to_owned(), "eu".to_owned()];
     let region = choose(
         s,
         "cloud-region",
-        &s.config.google.region,
+        regions.iter().position(|r| *r == s.config.google.region),
         &regions,
-        true,
+        idle,
         layers,
-        |s, v| {
-            s.config.google.region = v.into();
+        |s, i| {
+            if s.core.status().phase.busy() {
+                return;
+            }
+            s.config.google.region = ["us", "eu"][i].into();
             s.save_config();
             s.core.send(Cmd::Google(s.config.google.clone()));
         },
@@ -569,15 +580,25 @@ fn cloud(s: &App, layers: &mut Vec<El>) -> El {
                         .gap(6.0)
                         .child(label(s.t("Batas / bulan", "Monthly limit")))
                         .child(
-                            field("cloud-limit", &s.limit_edit, "600")
-                                .on_edit(|s: &mut App| &mut s.limit_edit)
-                                .on_input_change(|s: &mut App, _| {
-                                    if let Ok(v) = s.limit_edit.text.parse::<u32>() {
-                                        s.config.google.monthly_limit_minutes = v.min(60000);
-                                        s.save_config();
-                                        s.core.send(Cmd::Google(s.config.google.clone()));
-                                    }
-                                }),
+                            row()
+                                .center_y()
+                                .gap(6.0)
+                                .child(
+                                    field("cloud-limit", &s.limit_edit, "600")
+                                        .grow(1.0)
+                                        .shrink()
+                                        .min_w(0.0)
+                                        .on_edit(|s: &mut App| &mut s.limit_edit)
+                                        .on_input_change(|s: &mut App, _| {
+                                            if let Ok(v) = s.limit_edit.text.parse::<u32>() {
+                                                s.config.google.monthly_limit_minutes =
+                                                    v.min(60000);
+                                                s.save_config();
+                                                s.core.send(Cmd::Google(s.config.google.clone()));
+                                            }
+                                        }),
+                                )
+                                .child(label(s.t("menit", "min"))),
                         ),
                 ),
         );
@@ -596,6 +617,14 @@ fn cloud(s: &App, layers: &mut Vec<El>) -> El {
                         minutes * 0.016
                     )
                 })
+                .key("cloud-usage")
+                .color(
+                    if minutes >= s.config.google.monthly_limit_minutes as f64 * 0.8 {
+                        accent()
+                    } else {
+                        secondary()
+                    },
+                )
             }
             Err(e) => note(s, e, true),
         });
@@ -610,9 +639,28 @@ fn cloud(s: &App, layers: &mut Vec<El>) -> El {
         } else {
             s.config.google.project.trim()
         };
-        out=out.child(label(s.t("Jalankan di terminal, lalu mulai dikte:","Run in a terminal, then start dictation:")))
- .child(text(format!("gcloud auth application-default login\ngcloud auth application-default set-quota-project {project}")).key("adc-command").font(TextStyle::new(11.5,400.0).mono()).color(fg()).selectable(true).wrap_anywhere().w_full())
- .child(label(s.t("Penghitung lokal bukan tagihan Google. Bulan mengikuti UTC. Sisa minimal 2 menit untuk memulai sesi.","Local counter, not your Google bill. Months use UTC. At least 2 minutes must remain to start a session.")));
+        let commands = format!(
+            "gcloud auth application-default login\ngcloud auth application-default set-quota-project {project}"
+        );
+        let help = s.t(
+            "Penghitung lokal bukan tagihan Google. Bulan mengikuti UTC. Sisa minimal 2 menit untuk memulai sesi.",
+            "Local counter, not your Google bill. Months use UTC. At least 2 minutes must remain to start a session.",
+        );
+        out = out
+            .child(label(s.t(
+                "Jalankan di terminal, lalu mulai dikte:",
+                "Run in a terminal, then start dictation:",
+            )))
+            .child(
+                text(commands)
+                    .key("adc-command")
+                    .font(TextStyle::new(11.5, 400.0).mono())
+                    .color(fg())
+                    .selectable(true)
+                    .wrap_anywhere()
+                    .w_full(),
+            )
+            .child(label(help));
     }
     out
 }
@@ -691,20 +739,13 @@ fn model(s: &App, layers: &mut Vec<El>) -> El {
     let engine = choose(
         s,
         "engine",
-        s.engine.label(),
+        Engine::ALL.iter().position(|e| *e == s.engine),
         &options,
         idle,
         layers,
-        |s, v| {
-            if let Some(e) = Engine::ALL.into_iter().find(|e| e.label() == v) {
-                s.engine = e;
-                if e == Engine::GoogleChirp3 {
-                    s.config.engine = e;
-                    s.save_config();
-                    s.activate_cloud();
-                } else {
-                    s.refresh_models();
-                }
+        |s, i| {
+            if let Some(&e) = Engine::ALL.get(i) {
+                s.select_engine(e);
             }
         },
     );
@@ -713,7 +754,7 @@ fn model(s: &App, layers: &mut Vec<El>) -> El {
         .child(label(s.t("Mesin ASR", "ASR engine")))
         .child(engine);
     if s.engine == Engine::GoogleChirp3 {
-        return out.child(cloud(s, layers).disabled(!idle));
+        return out.child(cloud(s, layers, idle).disabled(!idle));
     }
     let selected = s.selected_asr();
     let asr_label = if s.engine.is_qwen() {
@@ -777,6 +818,8 @@ fn model(s: &App, layers: &mut Vec<El>) -> El {
     out
 }
 pub fn view(s: &App, cx: &mut Cx<App>) -> El {
+    let reduced = cx.is_reduced_motion();
+    s.reduced_motion.set(reduced);
     cx.focus_ring(1.0, 0.0, accent());
     let mut layers = Vec::new();
     let settings = settings(s, &mut layers);
@@ -790,7 +833,7 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
             row()
                 .grow(1.0)
                 .gap(12.0)
-                .child(dictation(s))
+                .child(dictation(s, reduced))
                 .child(result(s)),
         )
         .child(row().gap(12.0).child(settings).child(model));

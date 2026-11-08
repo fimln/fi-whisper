@@ -93,6 +93,108 @@ fn speech_meter_range() {
 }
 
 #[test]
+fn engine_switch_invalidates_cloud_before_loading_local_and_rejects_busy_switches() {
+    let mut s = App::create(true);
+    s.engine = Engine::GoogleChirp3;
+    {
+        let mut st = s.core.status();
+        st.phase = crate::Phase::CloudIdle;
+        st.loaded = Some((Engine::GoogleChirp3, "".into(), "".into()));
+    }
+    s.select_engine(Engine::Whisper);
+    assert_eq!(s.engine, Engine::Whisper);
+    assert_eq!(s.config.engine, Engine::Whisper);
+    assert!(s.core.status().loaded.is_none());
+    s.core.status().phase = crate::Phase::Recording;
+    s.select_engine(Engine::GoogleChirp3);
+    assert_eq!(s.engine, Engine::Whisper);
+}
+
+#[test]
+fn microphones_with_identical_names_remain_individually_selectable() {
+    let mut rt = runtime((700.0, 680.0));
+    rt.update(|s, _| {
+        s.mics = vec![
+            crate::audio::Mic {
+                id: "first".into(),
+                name: "Microphone".into(),
+            },
+            crate::audio::Mic {
+                id: "second".into(),
+                name: "Microphone".into(),
+            },
+        ];
+    });
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    let (x, y) = rt.find("microphone-trigger").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    let (x, y) = rt.find("option2").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(rt.state.config.microphone.as_deref(), Some("second"));
+}
+
+#[test]
+fn already_open_region_popup_cannot_change_settings_after_recording_starts() {
+    let mut rt = runtime((700.0, 680.0));
+    rt.update(|s, _| {
+        s.engine = Engine::GoogleChirp3;
+    });
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    let (x, y) = rt.find("cloud-region-trigger").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    let (x, y) = rt.find("option1").unwrap();
+    // Change the controller state without rebuilding the mounted popup first.
+    rt.state.core.status().phase = crate::Phase::Recording;
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert_eq!(rt.state.config.google.region, "us");
+    assert!(rt.find("cloud-region-content").is_none());
+}
+
+#[test]
+fn reduced_motion_keeps_meter_still_and_polls_busy_state_less_often() {
+    let mut rt = runtime((700.0, 680.0));
+    rt.set_system_reduced_motion(true);
+    rt.update(|s, _| {
+        s.core.status().phase = crate::Phase::Recording;
+        s.level = 0.5;
+        s.now = 1.0;
+    });
+    rt.frame(0.0);
+    let bars = |rt: &Runtime<App>| {
+        (0..32)
+            .map(|i| rt.presented(&format!("bar-{i}")).unwrap().0)
+            .collect::<Vec<_>>()
+    };
+    let before = bars(&rt);
+    rt.update(|s, _| s.now = 2.0);
+    rt.frame(0.0);
+    assert_eq!(before, bars(&rt));
+    rt.update(|s, tx| {
+        crate::poll(s, 10.0, tx);
+    });
+    rt.frame(0.0);
+    assert!((rt.wake_deadline().unwrap() - rt.t - 0.25).abs() < 0.001);
+}
+
+#[test]
 fn cloud_cards_fill_window_height_after_resize() {
     for size in [(700.0, 680.0), (1000.0, 900.0), (560.0, 600.0)] {
         let mut rt = runtime(size);

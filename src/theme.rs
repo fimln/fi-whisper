@@ -82,7 +82,7 @@ pub fn kit() -> rune_kit::Kit {
 }
 pub fn logo() -> rune::Pixels {
     let p = rune::Pixels::new();
-    p.set(128, 128, include_bytes!("../assets/logo-128.rgba").to_vec());
+    p.set(LOGO_SIZE as u32, LOGO_SIZE as u32, LOGO_RGBA.to_vec());
     p
 }
 

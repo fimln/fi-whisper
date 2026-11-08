@@ -15,7 +15,8 @@ use windows_sys::Win32::Graphics::Dwm::{
     DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
 };
 use windows_sys::Win32::Graphics::Gdi::{
-    GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow,
+    GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITOR_DEFAULTTOPRIMARY, MONITORINFO,
+    MonitorFromWindow,
 };
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
@@ -32,8 +33,8 @@ use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
 use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GWL_STYLE, GetWindowLongPtrW, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP,
-    HTTOPLEFT, HTTOPRIGHT, IsZoomed, SWP_FRAMECHANGED, SWP_NOMOVE, SetWindowLongPtrW,
-    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WS_CAPTION, WS_THICKFRAME,
+    HTTOPLEFT, HTTOPRIGHT, IsZoomed, NCCALCSIZE_PARAMS, SWP_FRAMECHANGED, SWP_NOMOVE,
+    SetWindowLongPtrW, WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WS_CAPTION, WS_THICKFRAME,
 };
 use windows_sys::Win32::UI::WindowsAndMessaging::{
     GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindow,
@@ -81,6 +82,21 @@ unsafe extern "system" fn window_frame(
 ) -> LRESULT {
     unsafe {
         if msg == WM_NCCALCSIZE && w != 0 {
+            if IsZoomed(hwnd) != 0 {
+                let mut monitor = MONITORINFO {
+                    cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                    ..Default::default()
+                };
+                if GetMonitorInfoW(
+                    MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST),
+                    &mut monitor,
+                ) != 0
+                {
+                    (*(l as *mut NCCALCSIZE_PARAMS)).rgrc[0] = monitor.rcWork;
+                } else {
+                    return DefSubclassProc(hwnd, msg, w, l);
+                }
+            }
             return 0;
         }
         if msg == WM_NCHITTEST && IsZoomed(hwnd) == 0 {
@@ -702,9 +718,9 @@ impl Tray {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     #[test]
     fn resize_edges_include_all_corners_and_negative_screen_coordinates() {
-        use super::*;
         let rect = RECT {
             left: -800,
             top: -600,
@@ -726,7 +742,6 @@ mod tests {
         assert_eq!(resize_edge(-400, -300, rect, 12), None);
         assert_eq!(resize_edge(-801, -300, rect, 12), None);
     }
-    use super::*;
 
     #[test]
     fn callbacks_release_targets_and_hotkeys_can_be_recreated() {

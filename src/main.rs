@@ -12,6 +12,7 @@ mod ui_tests;
 mod windows;
 use config::{Config, Engine, Language};
 use controller::{Cmd, Handle, Phase, Source};
+use std::cell::Cell;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::sync::{Arc, OnceLock};
@@ -21,7 +22,6 @@ static APP_HANDLE: OnceLock<rune::AppHandle<App>> = OnceLock::new();
 struct Window {
     hwnd: AtomicIsize,
     quitting: AtomicBool,
-    open_requested: AtomicBool,
 }
 
 struct App {
@@ -61,6 +61,7 @@ struct App {
     icons: theme::Icons,
     cloud_usage: Option<(std::time::Instant, String, Result<u64, String>)>,
     preview: bool,
+    reduced_motion: Cell<bool>,
 }
 impl App {
     fn new() -> Self {
@@ -70,7 +71,6 @@ impl App {
         let window = Arc::new(Window {
             hwnd: AtomicIsize::new(0),
             quitting: AtomicBool::new(false),
-            open_requested: AtomicBool::new(false),
         });
         let core = controller::spawn(|| {
             if let Some(h) = APP_HANDLE.get() {
@@ -108,11 +108,8 @@ impl App {
         } else {
             windows::create_tray(move |action| match action {
                 windows::TrayAction::Open => {
-                    win.open_requested.store(true, Ordering::SeqCst);
                     if let Some(h) = APP_HANDLE.get() {
                         h.open();
-                    }
-                    if let Some(h) = APP_HANDLE.get() {
                         h.wake();
                     }
                 }
@@ -121,11 +118,8 @@ impl App {
                 }
                 windows::TrayAction::Quit => {
                     win.quitting.store(true, Ordering::SeqCst);
-                    // Tampilkan jendela agar event loop memproses penutupan.
                     if let Some(h) = APP_HANDLE.get() {
                         h.quit();
-                    }
-                    if let Some(h) = APP_HANDLE.get() {
                         h.wake();
                     }
                 }
@@ -135,14 +129,9 @@ impl App {
             _activation: if preview {
                 None
             } else {
-                let win = window.clone();
                 windows::Activation::new(move || {
-                    win.open_requested.store(true, Ordering::SeqCst);
                     if let Some(h) = APP_HANDLE.get() {
                         h.open();
-                    }
-
-                    if let Some(h) = APP_HANDLE.get() {
                         h.wake();
                     }
                 })
@@ -199,6 +188,7 @@ impl App {
             adc_open: false,
             diagnostics_open: false,
             preview,
+            reduced_motion: Cell::new(false),
         };
         match hotkeys {
             Ok(mut h) => {
@@ -346,7 +336,6 @@ impl App {
         }
     }
 
-    /// Satu baris dua kolom; kedua kartu disamakan tingginya memakai ukuran frame sebelumnya.
     fn activate_cloud(&self) {
         if self.preview {
             return;
@@ -357,6 +346,31 @@ impl App {
             asr: PathBuf::new(),
             vad: PathBuf::new(),
         });
+    }
+
+    fn select_engine(&mut self, engine: Engine) {
+        let mut st = self.core.status();
+        if st.phase.busy() || self.engine == engine {
+            return;
+        }
+        // Invalidate the old backend before a hotkey can start another session.
+        st.loaded = None;
+        drop(st);
+        self.engine = engine;
+        self.config.engine = engine;
+        self.save_config();
+        if engine == Engine::GoogleChirp3 {
+            self.activate_cloud();
+        } else {
+            self.refresh_models();
+            if !self.preview {
+                self.core.send(Cmd::Load {
+                    engine,
+                    asr: self.selected_asr().unwrap_or_default(),
+                    vad: self.vad.clone().unwrap_or_default(),
+                });
+            }
+        }
     }
 
     fn t<'a>(&self, id: &'a str, en: &'a str) -> &'a str {
@@ -400,7 +414,6 @@ fn poll(s: &mut App, now: f64, tx: &mut rune::Tx) -> bool {
     if s.window.quitting.load(Ordering::SeqCst) {
         tx.quit();
     }
-    s.window.open_requested.store(false, Ordering::SeqCst);
     let st = s.core.status();
     let busy = st.phase.busy();
     let revision = st.result_revision;
@@ -428,7 +441,13 @@ fn poll(s: &mut App, now: f64, tx: &mut rune::Tx) -> bool {
             cloud::usage_seconds(&s.config.google.project),
         ));
     }
-    if busy || now - s.result_flash < 0.8 || now - s.copy_flash < 0.6 {
+    if busy {
+        tx.wake_after(Duration::from_millis(if s.reduced_motion.get() {
+            250
+        } else {
+            33
+        }));
+    } else if !s.reduced_motion.get() && (now - s.result_flash < 0.8 || now - s.copy_flash < 0.6) {
         tx.wake_after(Duration::from_millis(33));
     }
     true
@@ -474,7 +493,10 @@ fn main() {
         poll: Some(poll),
         ..rune::AppSpec::new("fi-whisper", (700.0, 680.0), App::new, ui::view)
     };
+    let state = App::new();
+    let start_in_tray = std::env::args_os().any(|x| x == "--tray") && state.tray.is_some();
     let app = rune::App::new(spec)
+        .init(move || state)
         .keep_running()
         .window_options(rune::WindowOptions {
             borderless: true,
@@ -505,11 +527,7 @@ fn main() {
                 });
             }
         });
-    let app = if std::env::args_os().any(|x| x == "--tray") {
-        app.windowless()
-    } else {
-        app
-    };
+    let app = if start_in_tray { app.windowless() } else { app };
     let _ = APP_HANDLE.set(app.handle());
     app.run();
 }
