@@ -8,9 +8,15 @@ use std::time::{Duration, Instant};
 use tray_icon::menu::{Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
 use tray_icon::{MouseButton, MouseButtonState, TrayIcon, TrayIconBuilder, TrayIconEvent};
 use windows_sys::Win32::Foundation::{
-    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HWND, WAIT_OBJECT_0,
+    CloseHandle, ERROR_ALREADY_EXISTS, GetLastError, GlobalFree, HANDLE, HWND, LPARAM, LRESULT,
+    RECT, WAIT_OBJECT_0, WPARAM,
 };
-use windows_sys::Win32::Graphics::Dwm::{DWMWA_CLOAK, DwmSetWindowAttribute};
+use windows_sys::Win32::Graphics::Dwm::{
+    DWMWA_WINDOW_CORNER_PREFERENCE, DWMWCP_ROUND, DwmSetWindowAttribute,
+};
+use windows_sys::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MONITOR_DEFAULTTOPRIMARY, MONITORINFO, MonitorFromWindow,
+};
 use windows_sys::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
@@ -18,15 +24,131 @@ use windows_sys::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock,
 use windows_sys::Win32::System::Threading::{
     CreateEventW, CreateMutexW, GetCurrentProcessId, SetEvent, WaitForSingleObject,
 };
+use windows_sys::Win32::UI::HiDpi::GetDpiForWindow;
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
     GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, SendInput, VK_CONTROL, VK_LWIN, VK_MENU, VK_RWIN, VK_SHIFT,
 };
+use windows_sys::Win32::UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass};
 use windows_sys::Win32::UI::WindowsAndMessaging::{
-    GWL_EXSTYLE, GetClassNameW, GetForegroundWindow, GetWindowLongPtrW, GetWindowThreadProcessId,
-    IsIconic, IsWindow, SW_HIDE, SW_RESTORE, SW_SHOW, SetForegroundWindow, SetWindowLongPtrW,
-    ShowWindow, ShowWindowAsync, WS_EX_APPWINDOW, WS_EX_TOOLWINDOW,
+    GWL_STYLE, GetWindowLongPtrW, HTBOTTOM, HTBOTTOMLEFT, HTBOTTOMRIGHT, HTLEFT, HTRIGHT, HTTOP,
+    HTTOPLEFT, HTTOPRIGHT, IsZoomed, SWP_FRAMECHANGED, SWP_NOMOVE, SetWindowLongPtrW,
+    WM_NCCALCSIZE, WM_NCDESTROY, WM_NCHITTEST, WS_CAPTION, WS_THICKFRAME,
 };
+use windows_sys::Win32::UI::WindowsAndMessaging::{
+    GetClassNameW, GetForegroundWindow, GetWindowRect, GetWindowThreadProcessId, IsWindow,
+    SWP_NOACTIVATE, SWP_NOSIZE, SWP_NOZORDER, SetWindowPos,
+};
+
+pub fn configure_window(hwnd: HWND) {
+    // Keep native sizing and DWM rounding while drawing the entire caption ourselves.
+    unsafe {
+        if SetWindowSubclass(hwnd, Some(window_frame), 1, 0) != 0 {
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            SetWindowLongPtrW(
+                hwnd,
+                GWL_STYLE,
+                style | (WS_THICKFRAME | WS_CAPTION) as isize,
+            );
+            SetWindowPos(
+                hwnd,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+            );
+            let round = DWMWCP_ROUND;
+            DwmSetWindowAttribute(
+                hwnd,
+                DWMWA_WINDOW_CORNER_PREFERENCE as u32,
+                (&round as *const i32).cast(),
+                std::mem::size_of_val(&round) as u32,
+            );
+        }
+    }
+    center_window(hwnd);
+}
+
+unsafe extern "system" fn window_frame(
+    hwnd: HWND,
+    msg: u32,
+    w: WPARAM,
+    l: LPARAM,
+    id: usize,
+    _: usize,
+) -> LRESULT {
+    unsafe {
+        if msg == WM_NCCALCSIZE && w != 0 {
+            return 0;
+        }
+        if msg == WM_NCHITTEST && IsZoomed(hwnd) == 0 {
+            let mut rect = RECT::default();
+            if GetWindowRect(hwnd, &mut rect) != 0 {
+                let x = (l as u16 as i16) as i32;
+                let y = ((l >> 16) as u16 as i16) as i32;
+                let edge = (8 * GetDpiForWindow(hwnd) / 96).max(1) as i32;
+                if let Some(hit) = resize_edge(x, y, rect, edge) {
+                    return hit as LRESULT;
+                }
+            }
+        }
+        if msg == WM_NCDESTROY {
+            RemoveWindowSubclass(hwnd, Some(window_frame), id);
+        }
+        DefSubclassProc(hwnd, msg, w, l)
+    }
+}
+
+fn resize_edge(x: i32, y: i32, r: RECT, edge: i32) -> Option<u32> {
+    if x < r.left || x >= r.right || y < r.top || y >= r.bottom {
+        return None;
+    }
+    match (
+        x < r.left + edge,
+        x >= r.right - edge,
+        y < r.top + edge,
+        y >= r.bottom - edge,
+    ) {
+        (true, _, true, _) => Some(HTTOPLEFT),
+        (_, true, true, _) => Some(HTTOPRIGHT),
+        (true, _, _, true) => Some(HTBOTTOMLEFT),
+        (_, true, _, true) => Some(HTBOTTOMRIGHT),
+        (true, _, _, _) => Some(HTLEFT),
+        (_, true, _, _) => Some(HTRIGHT),
+        (_, _, true, _) => Some(HTTOP),
+        (_, _, _, true) => Some(HTBOTTOM),
+        _ => None,
+    }
+}
+
+pub fn center_window(hwnd: HWND) {
+    let mut rect = RECT::default();
+    let mut monitor = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    // Use physical pixels and the work area so DPI and the taskbar are accounted for.
+    unsafe {
+        let primary = MonitorFromWindow(std::ptr::null_mut(), MONITOR_DEFAULTTOPRIMARY);
+        if GetWindowRect(hwnd, &mut rect) == 0 || GetMonitorInfoW(primary, &mut monitor) == 0 {
+            return;
+        }
+        let work = monitor.rcWork;
+        let x = work.left + ((work.right - work.left - (rect.right - rect.left)) / 2).max(0);
+        let y = work.top + ((work.bottom - work.top - (rect.bottom - rect.top)) / 2).max(0);
+        SetWindowPos(
+            hwnd,
+            std::ptr::null_mut(),
+            x,
+            y,
+            0,
+            0,
+            SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+    }
+}
 
 const CF_UNICODETEXT: u32 = 13;
 const BATCH_CHARS: usize = 32;
@@ -298,93 +420,6 @@ pub fn unicode_inputs(chars: &[char]) -> Vec<INPUT> {
         }
     }
     inputs
-}
-
-// --- Jendela utama ---
-
-pub struct StartupWindow {
-    hwnd: isize,
-    frame: u64,
-}
-
-impl StartupWindow {
-    pub fn new(hwnd: isize, frame: u64) -> Option<Self> {
-        set_cloaked(hwnd, true).then_some(Self { hwnd, frame })
-    }
-
-    pub fn ready(&self, ctx: &eframe::egui::Context) -> bool {
-        if ctx.cumulative_frame_nr() > self.frame {
-            return true;
-        }
-        ctx.send_viewport_cmd(eframe::egui::ViewportCommand::RequestPaintWhileHidden);
-        ctx.request_repaint();
-        false
-    }
-}
-
-impl Drop for StartupWindow {
-    fn drop(&mut self) {
-        set_cloaked(self.hwnd, false);
-    }
-}
-
-fn set_cloaked(hwnd: isize, cloaked: bool) -> bool {
-    let value = i32::from(cloaked);
-    unsafe {
-        DwmSetWindowAttribute(
-            hwnd as HWND,
-            DWMWA_CLOAK as u32,
-            (&raw const value).cast(),
-            size_of::<i32>() as u32,
-        ) >= 0
-    }
-}
-
-/// Bangunkan event loop tersembunyi tanpa memblokir thread pemantau aktivasi.
-pub fn request_show_window(hwnd: isize) {
-    // Harus sebelum ShowWindowAsync: event loop bisa bangun setelah jendela ditampilkan.
-    set_cloaked(hwnd, true);
-    let hwnd = hwnd as HWND;
-    unsafe {
-        ShowWindowAsync(
-            hwnd,
-            if IsIconic(hwnd) != 0 {
-                SW_RESTORE
-            } else {
-                SW_SHOW
-            },
-        );
-    }
-}
-
-pub fn show_window(hwnd: isize) {
-    let hwnd = hwnd as HWND;
-    unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-        SetWindowLongPtrW(
-            hwnd,
-            GWL_EXSTYLE,
-            (style & !(WS_EX_TOOLWINDOW as isize)) | WS_EX_APPWINDOW as isize,
-        );
-        ShowWindow(
-            hwnd,
-            if IsIconic(hwnd) != 0 {
-                SW_RESTORE
-            } else {
-                SW_SHOW
-            },
-        );
-        SetForegroundWindow(hwnd);
-    }
-}
-
-/// Sembunyikan langsung lewat Win32. `ViewportCommand::Visible(false)` tidak dipakai karena winit
-/// menyimpan status visible sendiri: setelah jendela ditampilkan lagi oleh `show_window`, perintah
-/// hide berikutnya dianggap no-op dan tombol close tampak tidak bekerja.
-pub fn hide_window(hwnd: isize) {
-    unsafe {
-        ShowWindow(hwnd as HWND, SW_HIDE);
-    }
 }
 
 /// Pelepasan satu kali saat masuk tray dalam keadaan idle.
@@ -667,37 +702,31 @@ impl Tray {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
-    fn startup_and_reopen_wait_for_complete_frame_including_discarded_passes() {
-        use eframe::egui::{Context, RawInput, ViewportCommand, ViewportId};
-
-        assert!(StartupWindow::new(0, 0).is_none());
-        let ctx = Context::default();
-        for _ in 0..3 {
-            let startup = StartupWindow {
-                hwnd: 0,
-                frame: ctx.cumulative_frame_nr(),
-            };
-            let logic = ctx.run_logic(&RawInput::default(), |ctx| assert!(!startup.ready(ctx)));
-            assert!(
-                logic.viewport_commands[&ViewportId::ROOT]
-                    .contains(&ViewportCommand::RequestPaintWhileHidden)
-            );
-            let mut passes = 0;
-            let _ = ctx.run_ui(RawInput::default(), |ui| {
-                assert!(!startup.ready(ui.ctx()));
-                passes += 1;
-                ui.label("Uji");
-                if passes == 1 {
-                    ui.ctx().request_discard("uji multipass");
-                }
-            });
-            assert_eq!(passes, 2);
-            assert!(startup.ready(&ctx));
+    fn resize_edges_include_all_corners_and_negative_screen_coordinates() {
+        use super::*;
+        let rect = RECT {
+            left: -800,
+            top: -600,
+            right: -100,
+            bottom: 50,
+        };
+        for (x, y, hit) in [
+            (-800, -600, HTTOPLEFT),
+            (-101, -600, HTTOPRIGHT),
+            (-800, 49, HTBOTTOMLEFT),
+            (-101, 49, HTBOTTOMRIGHT),
+            (-800, -300, HTLEFT),
+            (-101, -300, HTRIGHT),
+            (-400, -600, HTTOP),
+            (-400, 49, HTBOTTOM),
+        ] {
+            assert_eq!(resize_edge(x, y, rect, 12), Some(hit));
         }
+        assert_eq!(resize_edge(-400, -300, rect, 12), None);
+        assert_eq!(resize_edge(-801, -300, rect, 12), None);
     }
+    use super::*;
 
     #[test]
     fn callbacks_release_targets_and_hotkeys_can_be_recreated() {
