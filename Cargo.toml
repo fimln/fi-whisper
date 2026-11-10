@@ -6,15 +6,13 @@ rust-version = "1.95"
 license = "MIT"
 
 [features]
+inspection = ["eframe/inspection"]
 cuda = ["whisper-rs/cuda"]
 # Qwen3-ASR di GPU lewat candle CUDA (terpisah dari `cuda` milik whisper.cpp).
 qwen-cuda = ["qwen3-asr/cuda", "candle-core/cuda"]
 
 [dependencies]
-rune = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", default-features = false, features = ["accessibility"] }
-rune-kit = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b", default-features = false }
-rune-fx = { git = "https://github.com/anomalyco/rune", rev = "a7f276c3630f85a06a0230295da4d2bd172d8d3b" }
-wgpu = { version = "~30.0.1", default-features = false, features = ["std", "parking_lot", "wgsl", "dx12", "vulkan"] }
+eframe = { version = "=0.37.0", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow", "links"] }
 rfd = "=0.17.2"
 whisper-rs = { version = "=0.16.0", features = ["raw-api"] }
 # Qwen3-ASR (candle, pure Rust). Salinan 0.2.2 dengan patch fi-whisper: layout `*-hf` + abort.
@@ -28,7 +26,7 @@ global-hotkey = "=0.9.0"
 tray-icon = "=0.26.1"
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.154"
-windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Graphics_Gdi", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_HiDpi", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "=0.61.2", features = ["Win32_Foundation", "Win32_Graphics_Dwm", "Win32_Security", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Performance", "Win32_System_ProcessStatus", "Win32_System_Registry", "Win32_System_Threading", "Win32_System_SystemInformation", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging"] }
 
 # Transport async hanya dijalankan di thread cloud.
 tokio = { version = "=1.53.3", features = ["rt", "time", "sync", "macros", "net"] }

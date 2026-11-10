@@ -1,6 +1,6 @@
 # fi-whisper
 
-Aplikasi dikte Windows (Rust + Rune) dengan mesin lokal Whisper/Qwen3-ASR dan Google Cloud Chirp 3. Shortcut global merekam suara; mesin lokal memakai VAD Silero dan GPU, sedangkan cloud mengirim PCM langsung ke STT V2. Hasil final diketik ke jendela tujuan lewat SendInput. Repo publik: `fimln/fi-whisper`, lisensi MIT.
+Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR dan Google Cloud Chirp 3. Shortcut global merekam suara; mesin lokal memakai VAD Silero dan GPU, sedangkan cloud mengirim PCM langsung ke STT V2. Hasil final diketik ke jendela tujuan lewat SendInput. Repo publik: `fimln/fi-whisper`, lisensi MIT.
 
 ## Prinsip
 - Mesin lokal tidak membuka koneksi jaringan. Google Cloud Chirp 3 memakai ADC dan STT V2 hanya setelah cloud dipilih dan dikte dimulai. Tidak ada centang izin tambahan, telemetry, preflight startup, atau fallback otomatis. Token, audio, dan hasil cloud hanya di RAM.
@@ -10,7 +10,7 @@ Aplikasi dikte Windows (Rust + Rune) dengan mesin lokal Whisper/Qwen3-ASR dan Go
 - CPU fallback harus terlihat di UI, tidak boleh mengaku GPU.
 
 ## Struktur
-- `src/main.rs`: lifecycle aplikasi dan integrasi controller. `src/ui.rs`: header dan empat kartu. `src/effects.rs`: compositor glow GPU Rune.
+- `src/main.rs`: UI (header, kartu Dikte, Hasil terakhir, Pengaturan, Model).
 - `src/controller.rs`: state rekaman di thread sendiri (hotkey tetap jalan saat jendela tersembunyi), sesi, penyisipan teks.
 - `src/transcribe.rs`: worker model (VAD, Whisper, Qwen3-ASR), abort per sesi, uji fixture `#[ignore]`.
 - `src/cloud.rs`: ADC `authorized_user`, streaming gRPC Chirp 3 (`id-ID`, region `us`/`eu`), cancellation, batas penggunaan bulanan UTC.
@@ -37,8 +37,8 @@ Aplikasi dikte Windows (Rust + Rune) dengan mesin lokal Whisper/Qwen3-ASR dan Go
 - Tanpa dot status, hint mesin, atau tagline. Teks UI singkat, bahasa Indonesia.
 - Header cloud saat idle: badge `Chirp 3`, lalu status `Siap` dengan warna siap biasa. Kartu Model langsung menampilkan pengaturan project, tanpa logo Google Cloud atau teks pemeriksaan ADC; bantuan tetap di `Setup ADC`.
 - Hindari elemen yang muncul atau hilang di baris tombol (mis. spinner), karena menggeser layout.
-- Rune dipin revision di Cargo.toml. Cek visual lewat mode headless Rune: `target/release/fi-whisper.exe --snap target/rune.png --tree target/rune-tree.json`. Scene sintetis: `--scene cloud`, `recording`, `processing`, `english`. Jangan mengambil snapshot transkrip pengguna. Mode headless tidak mendaftarkan hotkey/tray, memuat model, atau menulis konfigurasi.
-- `rune-fx` menyediakan glow, aura, pulse, dan shimmer; hormati reduced motion dan hentikan animasi saat idle.
+- Di layout `right_to_left`, tambahkan anak dengan urutan terbalik. `Id::new` dan `WidgetType` deprecated di egui 0.37.
+- Cek visual lewat MCP egui: build `--features inspection`, jalankan dengan `EGUI_INSPECTION=1`. Fitur ini tidak boleh masuk build rilis.
 
 ## Perintah
 ```powershell

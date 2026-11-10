@@ -45,7 +45,7 @@ flowchart LR
     E --> Q[Qwen3-ASR 0.6B / 1.7B<br/>candle + CUDA]
     WH & Q -->|text| C
     C -->|SendInput| T[Target window]
-    C --> UI[UI Rune + tray]
+    C --> UI[UI egui + tray]
 ```
 ## Usage
 

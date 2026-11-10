@@ -385,21 +385,7 @@ impl Controller {
         }
     }
 
-    fn reserve_capture(&self) -> Option<bool> {
-        let mut st = self.st();
-        if !matches!(st.phase, Phase::CloudIdle | Phase::Ready | Phase::Error) {
-            return None;
-        }
-        let cloud = st.loaded.as_ref()?.0 == Engine::GoogleChirp3;
-        // Serialize capture startup with the UI's engine invalidation before opening audio.
-        st.phase = Phase::Recording;
-        Some(cloud)
-    }
-
     fn start(&mut self, source: Source) {
-        let Some(cloud) = self.reserve_capture() else {
-            return;
-        };
         // Target diambil saat shortcut ditekan; tombol GUI tidak pernah mengetik ke luar.
         self.target = match source {
             Source::Hotkey => windows::foreground_target(),
@@ -409,6 +395,11 @@ impl Controller {
         self.cancelling = false;
         let session = self.session;
         let tx = self.tx.clone();
+        let cloud = self
+            .st()
+            .loaded
+            .as_ref()
+            .is_some_and(|x| x.0 == Engine::GoogleChirp3);
         let on_end = move |end| {
             let _ = tx.send(Cmd::Captured { session, end });
         };
@@ -740,44 +731,6 @@ mod tests {
             outcome: Outcome::Text("test".into()),
             timing: Timing::default(),
         }
-    }
-
-    #[test]
-    fn capture_startup_is_busy_before_audio_setup_and_preserves_loaded_engine() {
-        let (tx, _rx) = mpsc::channel();
-        let mut c = Controller::new(tx);
-        let loaded = (Engine::Whisper, "asr".into(), "vad".into());
-        {
-            let mut st = c.st();
-            st.phase = Phase::Ready;
-            st.loaded = Some(loaded.clone());
-        }
-        assert_eq!(c.reserve_capture(), Some(false));
-        assert!(c.st().phase.busy());
-        c.handle(Cmd::Load {
-            engine: Engine::Qwen3Asr,
-            asr: "qwen".into(),
-            vad: "vad".into(),
-        });
-        assert_eq!(c.st().phase, Phase::Recording);
-        assert_eq!(c.st().loaded, Some(loaded));
-        assert_eq!(c.reserve_capture(), None);
-    }
-
-    #[test]
-    fn engine_invalidation_before_capture_startup_prevents_starting_old_backend() {
-        let (tx, _rx) = mpsc::channel();
-        let c = Controller::new(tx);
-        {
-            let mut st = c.st();
-            st.phase = Phase::CloudIdle;
-            st.loaded = Some((Engine::GoogleChirp3, PathBuf::new(), PathBuf::new()));
-        }
-        // The UI wins the status lock after toggle's idle check, before start reserves it.
-        c.st().loaded = None;
-        assert_eq!(c.reserve_capture(), None);
-        assert_eq!(c.st().phase, Phase::CloudIdle);
-        assert_eq!(c.session, 0);
     }
 
     #[test]
