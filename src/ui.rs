@@ -144,7 +144,7 @@ fn header(s: &App, width: f32) -> El {
     };
     let engine = st.loaded.as_ref().map(|x| x.0);
     let badge = engine.map(|e| {
-        if e == Engine::GoogleChirp3 {
+        if e.is_cloud() {
             e.short().to_owned()
         } else {
             format!("{}, {}", e.short(), st.backend)
@@ -552,7 +552,7 @@ fn cloud(s: &App, layers: &mut Vec<El>, idle: bool) -> El {
             s.core.send(Cmd::Google(s.config.google.clone()));
         },
     );
-    let mut out = col()
+    let out = col()
         .gap(8.0)
         .child(label("Project ID"))
         .child(
@@ -602,34 +602,7 @@ fn cloud(s: &App, layers: &mut Vec<El>, idle: bool) -> El {
                         ),
                 ),
         );
-    if let Some((_, _, usage)) = &s.cloud_usage {
-        out = out.child(match usage {
-            Ok(seconds) => {
-                let minutes = *seconds as f64 / 60.0;
-                label(if s.config.language == Language::English {
-                    format!(
-                        "This month: {minutes:.1} min | est. US${:.2}",
-                        minutes * 0.016
-                    )
-                } else {
-                    format!(
-                        "Bulan ini: {minutes:.1} menit | estimasi US${:.2}",
-                        minutes * 0.016
-                    )
-                })
-                .key("cloud-usage")
-                .color(
-                    if minutes >= s.config.google.monthly_limit_minutes as f64 * 0.8 {
-                        accent()
-                    } else {
-                        secondary()
-                    },
-                )
-            }
-            Err(e) => note(s, e, true),
-        });
-    }
-    out = out.child(
+    let mut out = usage_row(s, out, s.config.google.monthly_limit_minutes, 0.016).child(
         button("setup-adc", "Setup ADC", false, true)
             .on_press(|s: &mut App| s.adc_open = !s.adc_open),
     );
@@ -654,6 +627,91 @@ fn cloud(s: &App, layers: &mut Vec<El>, idle: bool) -> El {
             .child(
                 text(commands)
                     .key("adc-command")
+                    .font(TextStyle::new(11.5, 400.0).mono())
+                    .color(fg())
+                    .selectable(true)
+                    .wrap_anywhere()
+                    .w_full(),
+            )
+            .child(label(help));
+    }
+    out
+}
+fn usage_row(s: &App, out: El, limit: u32, rate: f64) -> El {
+    let Some((_, _, usage)) = &s.cloud_usage else {
+        return out;
+    };
+    out.child(match usage {
+        Ok(seconds) => {
+            let minutes = *seconds as f64 / 60.0;
+            label(if s.config.language == Language::English {
+                format!(
+                    "This month: {minutes:.1} min | est. US${:.2}",
+                    minutes * rate
+                )
+            } else {
+                format!(
+                    "Bulan ini: {minutes:.1} menit | estimasi US${:.2}",
+                    minutes * rate
+                )
+            })
+            .key("cloud-usage")
+            .color(if minutes >= f64::from(limit) * 0.8 {
+                accent()
+            } else {
+                secondary()
+            })
+        }
+        Err(e) => note(s, e, true),
+    })
+}
+fn deepseek(s: &App) -> El {
+    let out = col()
+        .gap(8.0)
+        .child(label(s.t("Batas / bulan", "Monthly limit")))
+        .child(
+            row()
+                .center_y()
+                .gap(6.0)
+                .child(
+                    field("deepseek-limit", &s.deepseek_limit_edit, "600")
+                        .grow(1.0)
+                        .shrink()
+                        .min_w(0.0)
+                        .on_edit(|s: &mut App| &mut s.deepseek_limit_edit)
+                        .on_input_change(|s: &mut App, _| {
+                            if let Ok(v) = s.deepseek_limit_edit.text.parse::<u32>() {
+                                s.config.deepseek.monthly_limit_minutes = v.min(60000);
+                                s.save_config();
+                                s.core.send(Cmd::DeepSeek(s.config.deepseek.clone()));
+                            }
+                        }),
+                )
+                .child(label(s.t("menit", "min"))),
+        );
+    let mut out = usage_row(
+        s,
+        out,
+        s.config.deepseek.monthly_limit_minutes,
+        0.116 / 60.0,
+    )
+    .child(
+        button("setup-api-key", "Setup API Key", false, true)
+            .on_press(|s: &mut App| s.api_key_open = !s.api_key_open),
+    );
+    if s.api_key_open {
+        let help = s.t(
+            "Atau isi deepseek.api_key di config.json. Penghitung lokal bukan tagihan DeepSeek. Bulan mengikuti UTC. Sisa minimal 2 menit untuk memulai sesi.",
+            "Or set deepseek.api_key in config.json. Local counter, not your DeepSeek bill. Months use UTC. At least 2 minutes must remain to start a session.",
+        );
+        out = out
+            .child(label(s.t(
+                "Jalankan di terminal, lalu mulai ulang aplikasi:",
+                "Run in a terminal, then restart the app:",
+            )))
+            .child(
+                text("setx DEEPSEEK_API_KEY \"API_KEY\"")
+                    .key("api-key-command")
                     .font(TextStyle::new(11.5, 400.0).mono())
                     .color(fg())
                     .selectable(true)
@@ -755,6 +813,9 @@ fn model(s: &App, layers: &mut Vec<El>) -> El {
         .child(engine);
     if s.engine == Engine::GoogleChirp3 {
         return out.child(cloud(s, layers, idle).disabled(!idle));
+    }
+    if s.engine == Engine::DeepSeekAsr {
+        return out.child(deepseek(s).disabled(!idle));
     }
     let selected = s.selected_asr();
     let asr_label = if s.engine.is_qwen() {
@@ -858,6 +919,8 @@ pub fn view(s: &App, cx: &mut Cx<App>) -> El {
                             s.project_edit = TextEdit::new(&s.config.google.project);
                             s.limit_edit =
                                 TextEdit::new(s.config.google.monthly_limit_minutes.to_string());
+                            s.deepseek_limit_edit =
+                                TextEdit::new(s.config.deepseek.monthly_limit_minutes.to_string());
                             s.shortcut_input = s.config.shortcut.clone();
                             s.apply_shortcut();
                             s.refresh_mics();

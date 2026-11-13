@@ -48,8 +48,10 @@ struct App {
     shortcut_edit: rune::TextEdit,
     project_edit: rune::TextEdit,
     limit_edit: rune::TextEdit,
+    deepseek_limit_edit: rune::TextEdit,
     menu: Option<String>,
     adc_open: bool,
+    api_key_open: bool,
     diagnostics_open: bool,
     level: f32,
     level_time: std::time::Instant,
@@ -144,22 +146,22 @@ impl App {
 
             engine: config.engine,
             asr: config.asr_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model(config::ASR_DIR, config::ASR_FILE))
                     .flatten()
             }),
             qwen: config.qwen_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model_dir(config::QWEN_DIR))
                     .flatten()
             }),
             qwen17: config.qwen17_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model_dir(config::QWEN17_DIR))
                     .flatten()
             }),
             vad: config.vad_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model(config::VAD_DIR, config::VAD_FILE))
                     .flatten()
             }),
@@ -184,8 +186,10 @@ impl App {
             shortcut_edit: rune::TextEdit::new(""),
             project_edit: rune::TextEdit::new(""),
             limit_edit: rune::TextEdit::new(""),
+            deepseek_limit_edit: rune::TextEdit::new(""),
             menu: None,
             adc_open: false,
+            api_key_open: false,
             diagnostics_open: false,
             preview,
             reduced_motion: Cell::new(false),
@@ -206,6 +210,8 @@ impl App {
         app.shortcut_edit = rune::TextEdit::new(&app.shortcut_input);
         app.project_edit = rune::TextEdit::new(&app.config.google.project);
         app.limit_edit = rune::TextEdit::new(app.config.google.monthly_limit_minutes.to_string());
+        app.deepseek_limit_edit =
+            rune::TextEdit::new(app.config.deepseek.monthly_limit_minutes.to_string());
         if preview {
             app.hotkeys = None;
             app.tray = None;
@@ -213,11 +219,11 @@ impl App {
             return app;
         }
         app.refresh_mics();
-        if app.engine != Engine::GoogleChirp3 {
+        if !app.engine.is_cloud() {
             app.refresh_models();
         }
         app.push_settings();
-        if app.engine == Engine::GoogleChirp3 {
+        if app.engine.is_cloud() {
             app.activate_cloud();
         } else if let (Some(asr), Some(vad)) = (app.selected_asr(), app.vad.clone()) {
             app.core.send(Cmd::Load {
@@ -235,7 +241,7 @@ impl App {
             Engine::Whisper => self.asr.clone(),
             Engine::Qwen3Asr => self.qwen.clone(),
             Engine::Qwen3Asr17 => self.qwen17.clone(),
-            Engine::GoogleChirp3 => None,
+            Engine::GoogleChirp3 | Engine::DeepSeekAsr => None,
         }
     }
 
@@ -244,7 +250,9 @@ impl App {
             Engine::Whisper => &mut self.asr,
             Engine::Qwen3Asr => &mut self.qwen,
             Engine::Qwen3Asr17 => &mut self.qwen17,
-            Engine::GoogleChirp3 => unreachable!("Cloud tidak memiliki path model"),
+            Engine::GoogleChirp3 | Engine::DeepSeekAsr => {
+                unreachable!("Cloud tidak memiliki path model")
+            }
         };
         (path, &mut self.model_valid[engine as usize])
     }
@@ -280,10 +288,16 @@ impl App {
         if self.preview || !self.config_error.is_empty() {
             return;
         }
-        if let Some(path) = &self.config_path
-            && let Err(e) = config::save(path, &self.config)
-        {
-            self.config_error = format!("Konfigurasi gagal disimpan: {e}");
+        if let Some(path) = &self.config_path {
+            if self.config.deepseek.api_key.is_empty()
+                && let Ok(Some(disk)) = config::load(path)
+                && !disk.deepseek.api_key.is_empty()
+            {
+                self.config.deepseek.api_key = disk.deepseek.api_key;
+            }
+            if let Err(e) = config::save(path, &self.config) {
+                self.config_error = format!("Konfigurasi gagal disimpan: {e}");
+            }
         }
     }
 
@@ -341,8 +355,9 @@ impl App {
             return;
         }
         self.core.send(Cmd::Google(self.config.google.clone()));
+        self.core.send(Cmd::DeepSeek(self.config.deepseek.clone()));
         self.core.send(Cmd::Load {
-            engine: Engine::GoogleChirp3,
+            engine: self.engine,
             asr: PathBuf::new(),
             vad: PathBuf::new(),
         });
@@ -358,8 +373,9 @@ impl App {
         drop(st);
         self.engine = engine;
         self.config.engine = engine;
+        self.cloud_usage = None;
         self.save_config();
-        if engine == Engine::GoogleChirp3 {
+        if engine.is_cloud() {
             self.activate_cloud();
         } else {
             self.refresh_models();
@@ -384,7 +400,7 @@ impl App {
         if self.preview || self.core.status().phase.busy() {
             return;
         }
-        if self.engine == Engine::GoogleChirp3 {
+        if self.engine.is_cloud() {
             self.config.engine = self.engine;
             self.save_config();
             self.activate_cloud();
@@ -429,16 +445,21 @@ fn poll(s: &mut App, now: f64, tx: &mut rune::Tx) -> bool {
         s.result_revision = revision;
         s.result_flash = now;
     }
-    if s.engine == Engine::GoogleChirp3
+    let usage_key = match s.engine {
+        Engine::GoogleChirp3 => Some(s.config.google.project.as_str()),
+        Engine::DeepSeekAsr => Some(cloud::DEEPSEEK_USAGE_KEY),
+        _ => None,
+    };
+    if let Some(key) = usage_key
         && !s.preview
-        && s.cloud_usage.as_ref().is_none_or(|(at, project, _)| {
-            at.elapsed() >= Duration::from_secs(1) || project != &s.config.google.project
-        })
+        && s.cloud_usage
+            .as_ref()
+            .is_none_or(|(at, project, _)| at.elapsed() >= Duration::from_secs(1) || project != key)
     {
         s.cloud_usage = Some((
             std::time::Instant::now(),
-            s.config.google.project.clone(),
-            cloud::usage_seconds(&s.config.google.project),
+            key.to_owned(),
+            cloud::usage_seconds(key),
         ));
     }
     if busy {
@@ -611,6 +632,51 @@ fn message(text: &str, english: bool) -> String {
         (
             "Google Cloud tidak terhubung. Periksa internet.",
             "Cannot connect to Google Cloud. Check your internet.",
+        ),
+        (
+            "API key DeepSeek belum tersedia. Buka Setup API Key.",
+            "DeepSeek API key unavailable. Open Setup API Key.",
+        ),
+        ("API key DeepSeek tidak valid.", "Invalid DeepSeek API key."),
+        (
+            "API key DeepSeek ditolak. Periksa DEEPSEEK_API_KEY.",
+            "DeepSeek API key rejected. Check DEEPSEEK_API_KEY.",
+        ),
+        (
+            "Saldo DeepSeek tidak mencukupi.",
+            "Insufficient DeepSeek balance.",
+        ),
+        (
+            "Format audio ditolak DeepSeek.",
+            "Audio format rejected by DeepSeek.",
+        ),
+        (
+            "Batas waktu DeepSeek terlampaui.",
+            "DeepSeek request timed out.",
+        ),
+        (
+            "Ukuran audio melebihi batas 8 MiB DeepSeek.",
+            "Audio exceeds DeepSeek 8 MiB limit.",
+        ),
+        (
+            "Terlalu banyak permintaan DeepSeek yang sedang berjalan.",
+            "Too many DeepSeek requests in progress.",
+        ),
+        (
+            "Layanan DeepSeek sedang sibuk. Coba lagi nanti.",
+            "DeepSeek service is busy. Try again later.",
+        ),
+        (
+            "DeepSeek tidak terhubung. Periksa internet.",
+            "Cannot connect to DeepSeek. Check your internet.",
+        ),
+        (
+            "Respons DeepSeek tidak valid.",
+            "Invalid response from DeepSeek.",
+        ),
+        (
+            "Transkripsi DeepSeek gagal. Periksa koneksi dan API key.",
+            "DeepSeek transcription failed. Check your connection and API key.",
         ),
         (
             "Mikrofon pilihan tidak ditemukan. Pilih ulang atau gunakan default sistem.",

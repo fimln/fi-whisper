@@ -63,6 +63,33 @@ fn dropdown_opens_and_cloud_form_has_no_local_model_fields() {
     let (command, _) = rt.presented("adc-command").unwrap();
     let (model, _) = rt.presented("model").unwrap();
     assert!(command[0] + command[2] <= model[0] + model[2]);
+
+    let (x, y) = rt.find("engine-trigger").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    let (x, y) = rt.find("option4").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    for _ in 0..30 {
+        rt.frame(1.0 / 60.0);
+    }
+    assert_eq!(rt.state.engine, Engine::DeepSeekAsr);
+    assert!(rt.find("deepseek-limit").is_some());
+    assert!(rt.find("cloud-project").is_none());
+    assert!(rt.find("cloud-region-trigger").is_none());
+    assert!(rt.find("asr-file").is_none());
+    assert!(rt.find("vad-file").is_none());
+    let (x, y) = rt.find("setup-api-key").unwrap();
+    rt.pointer_down(x, y);
+    rt.pointer_up(x, y);
+    rt.frame(0.0);
+    assert!(rt.state.api_key_open);
+    let (command, _) = rt.presented("api-key-command").unwrap();
+    let (model, _) = rt.presented("model").unwrap();
+    assert!(command[0] + command[2] <= model[0] + model[2]);
 }
 #[test]
 fn preview_does_not_register_native_resources_or_write_config() {

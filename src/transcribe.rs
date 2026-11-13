@@ -176,7 +176,7 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Even
                 take_log();
                 // Lepas VRAM sebelum alokasi model baru, termasuk saat muat ulang.
                 let had_models = models.take().is_some();
-                if engine == Engine::GoogleChirp3 {
+                if engine.is_cloud() {
                     if had_models {
                         reset_cuda_device();
                     }
@@ -272,7 +272,7 @@ fn load(
     if !vad.is_file() {
         return Err(format!("File model VAD tidak ditemukan: {}", vad.display()));
     }
-    if engine == Engine::GoogleChirp3 {
+    if engine.is_cloud() {
         return Err("Cloud tidak memakai loader lokal.".into());
     }
     let mut vad_params = WhisperVadContextParams::default();
@@ -282,7 +282,7 @@ fn load(
         format!("Model VAD gagal dimuat ({e}). Gunakan model Silero GGML untuk whisper.cpp.")
     })?;
     let (asr, backend) = match engine {
-        Engine::GoogleChirp3 => unreachable!(),
+        Engine::GoogleChirp3 | Engine::DeepSeekAsr => unreachable!(),
         Engine::Whisper => (Asr::Whisper(load_whisper(asr)?), None),
         Engine::Qwen3Asr | Engine::Qwen3Asr17 => {
             let (model, backend) = load_qwen(asr)?;

@@ -59,6 +59,7 @@ pub struct Status {
 pub enum Cmd {
     Shutdown,
     Google(crate::config::GoogleConfig),
+    DeepSeek(crate::config::DeepSeekConfig),
     CloudFinished {
         session: u64,
         result: Result<String, String>,
@@ -151,6 +152,7 @@ struct Controller {
     status: Arc<Mutex<Status>>,
     worker: Worker,
     google: crate::config::GoogleConfig,
+    deepseek: crate::config::DeepSeekConfig,
     cloud: Option<cloud::Session>,
     worker_gen: u64,
     mic: Option<String>,
@@ -202,6 +204,7 @@ impl Controller {
         Self {
             worker: spawn_worker(&tx, 0),
             google: Default::default(),
+            deepseek: Default::default(),
             cloud: None,
             worker_gen: 0,
             tx,
@@ -275,6 +278,11 @@ impl Controller {
             Cmd::Google(settings) => {
                 if !self.st().phase.busy() {
                     self.google = settings;
+                }
+            }
+            Cmd::DeepSeek(settings) => {
+                if !self.st().phase.busy() {
+                    self.deepseek = settings;
                 }
             }
             Cmd::CloudFinished { session, result } => {
@@ -385,19 +393,19 @@ impl Controller {
         }
     }
 
-    fn reserve_capture(&self) -> Option<bool> {
+    fn reserve_capture(&self) -> Option<Engine> {
         let mut st = self.st();
         if !matches!(st.phase, Phase::CloudIdle | Phase::Ready | Phase::Error) {
             return None;
         }
-        let cloud = st.loaded.as_ref()?.0 == Engine::GoogleChirp3;
+        let engine = st.loaded.as_ref()?.0;
         // Serialize capture startup with the UI's engine invalidation before opening audio.
         st.phase = Phase::Recording;
-        Some(cloud)
+        Some(engine)
     }
 
     fn start(&mut self, source: Source) {
-        let Some(cloud) = self.reserve_capture() else {
+        let Some(engine) = self.reserve_capture() else {
             return;
         };
         // Target diambil saat shortcut ditekan; tombol GUI tidak pernah mengetik ke luar.
@@ -412,11 +420,17 @@ impl Controller {
         let on_end = move |end| {
             let _ = tx.send(Cmd::Captured { session, end });
         };
-        let capture = if cloud {
+        let capture = if engine.is_cloud() {
             let tx = self.tx.clone();
-            match cloud::Session::start(self.google.clone(), self.language, move |result| {
+            let done = move |result| {
                 let _ = tx.send(Cmd::CloudFinished { session, result });
-            }) {
+            };
+            let cloud = if engine == Engine::DeepSeekAsr {
+                cloud::Session::start_deepseek(self.deepseek.clone(), done)
+            } else {
+                cloud::Session::start(self.google.clone(), self.language, done)
+            };
+            match cloud {
                 Ok(session) => {
                     let sink = session.audio.as_ref().unwrap().clone();
                     self.cloud = Some(session);
@@ -648,7 +662,7 @@ impl Controller {
                 took,
             } => {
                 let mut st = self.st();
-                st.phase = if engine == Engine::GoogleChirp3 {
+                st.phase = if engine.is_cloud() {
                     Phase::CloudIdle
                 } else {
                     Phase::Ready
@@ -683,11 +697,7 @@ impl Controller {
                     .map_or(timing.vad + timing.asr, |t| t.elapsed());
                 let target = self.target.take();
                 let mut st = self.st();
-                st.phase = if st
-                    .loaded
-                    .as_ref()
-                    .is_some_and(|x| x.0 == Engine::GoogleChirp3)
-                {
+                st.phase = if st.loaded.as_ref().is_some_and(|x| x.0.is_cloud()) {
                     Phase::CloudIdle
                 } else {
                     Phase::Ready
@@ -752,7 +762,7 @@ mod tests {
             st.phase = Phase::Ready;
             st.loaded = Some(loaded.clone());
         }
-        assert_eq!(c.reserve_capture(), Some(false));
+        assert_eq!(c.reserve_capture(), Some(Engine::Whisper));
         assert!(c.st().phase.busy());
         c.handle(Cmd::Load {
             engine: Engine::Qwen3Asr,
