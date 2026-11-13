@@ -1,8 +1,9 @@
-//! Google STT V2. Audio, transkrip, dan token hanya berada di RAM.
-use crate::config::{self, GoogleConfig, Language};
+//! Google STT V2 dan DeepSeek ASR. Audio, transkrip, dan token hanya berada di RAM.
+use crate::config::{self, DeepSeekConfig, GoogleConfig, Language};
 use googleapis_tonic_google_cloud_speech_v2::google::cloud::speech::v2 as api;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, Ordering},
@@ -11,7 +12,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
+pub const DEEPSEEK_USAGE_KEY: &str = "deepseek:api";
 const AUDIO_BUFFER_CHUNKS: usize = 200;
+const BOUNDARY: &str = "----fiwhisperdeepseekasr9f8e7d6c";
 static TOKEN_CACHE: Mutex<Option<CachedToken>> = Mutex::new(None);
 
 struct CachedToken {
@@ -37,7 +40,32 @@ impl Session {
         done: impl FnOnce(Result<String, String>) + Send + 'static,
     ) -> Result<Self, String> {
         validate(&settings)?;
-        let reservation = reserve(&settings)?;
+        let reservation = reserve(&settings.project, settings.monthly_limit_minutes)?;
+        Self::spawn(reservation, done, move |rx, sent| async move {
+            recognize(&settings, language, rx, sent).await
+        })
+    }
+
+    pub fn start_deepseek(
+        settings: DeepSeekConfig,
+        done: impl FnOnce(Result<String, String>) + Send + 'static,
+    ) -> Result<Self, String> {
+        let key = deepseek_key(&settings)?;
+        let reservation = reserve(DEEPSEEK_USAGE_KEY, settings.monthly_limit_minutes)?;
+        Self::spawn(reservation, done, move |rx, sent| async move {
+            recognize_deepseek(&key, rx, sent).await
+        })
+    }
+
+    fn spawn<F, Fut>(
+        reservation: Reservation,
+        done: impl FnOnce(Result<String, String>) + Send + 'static,
+        task: F,
+    ) -> Result<Self, String>
+    where
+        F: FnOnce(mpsc::Receiver<Vec<u8>>, Arc<AtomicU64>) -> Fut + Send + 'static,
+        Fut: Future<Output = Result<String, String>>,
+    {
         let (audio, rx) = mpsc::channel(AUDIO_BUFFER_CHUNKS); // 20 detik: startup token + koneksi sampai 16 detik.
         let (cancel, mut cancelled) = watch::channel(false);
         let sent = Arc::new(AtomicU64::new(0));
@@ -48,7 +76,7 @@ impl Session {
                     tokio::select! {
                         biased;
                         _ = cancelled.changed() => Err("Sesi cloud dibatalkan.".into()),
-                        result = tokio::time::timeout(Duration::from_secs(165), recognize(&settings, language, rx, sent.clone())) =>
+                        result = tokio::time::timeout(Duration::from_secs(165), task(rx, sent.clone())) =>
                             result.unwrap_or_else(|_| Err("Batas waktu cloud terlampaui.".into())),
                     }
                     });
@@ -336,6 +364,120 @@ fn status(s: tonic::Status) -> String {
     .into()
 }
 
+pub fn deepseek_key(c: &DeepSeekConfig) -> Result<String, String> {
+    let env_key = std::env::var("DEEPSEEK_API_KEY")
+        .ok()
+        .map(|s| s.trim().to_owned())
+        .filter(|s| !s.is_empty());
+    let cfg_key = (!c.api_key.trim().is_empty()).then(|| c.api_key.trim().to_owned());
+    let disk_key = || {
+        let path = config::config_path()?;
+        let cfg = config::load(&path).ok()??;
+        let k = cfg.deepseek.api_key.trim();
+        (!k.is_empty()).then(|| k.to_owned())
+    };
+    let key = env_key
+        .or(cfg_key)
+        .or_else(disk_key)
+        .ok_or("API key DeepSeek belum tersedia. Buka Setup API Key.")?;
+    if !key.bytes().all(|b| b.is_ascii_graphic()) {
+        return Err("API key DeepSeek tidak valid.".into());
+    }
+    Ok(key)
+}
+
+fn wav_multipart(pcm: &[u8]) -> Vec<u8> {
+    let head = format!(
+        "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+    );
+    let tail = format!("\r\n--{BOUNDARY}--\r\n");
+    let data_len = pcm.len() as u32;
+    let riff_len = 36u32.saturating_add(data_len);
+    let mut out = Vec::with_capacity(head.len() + 44 + pcm.len() + tail.len());
+    out.extend_from_slice(head.as_bytes());
+    out.extend_from_slice(b"RIFF");
+    out.extend_from_slice(&riff_len.to_le_bytes());
+    out.extend_from_slice(b"WAVEfmt ");
+    out.extend_from_slice(&16u32.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&1u16.to_le_bytes());
+    out.extend_from_slice(&16000u32.to_le_bytes());
+    out.extend_from_slice(&32000u32.to_le_bytes());
+    out.extend_from_slice(&2u16.to_le_bytes());
+    out.extend_from_slice(&16u16.to_le_bytes());
+    out.extend_from_slice(b"data");
+    out.extend_from_slice(&data_len.to_le_bytes());
+    out.extend_from_slice(pcm);
+    out.extend_from_slice(tail.as_bytes());
+    out
+}
+
+fn deepseek_status(code: u16) -> String {
+    match code {
+        400 => "Format audio ditolak DeepSeek.",
+        401 | 403 => "API key DeepSeek ditolak. Periksa DEEPSEEK_API_KEY.",
+        402 => "Saldo DeepSeek tidak mencukupi.",
+        408 | 504 => "Batas waktu DeepSeek terlampaui.",
+        413 => "Ukuran audio melebihi batas 8 MiB DeepSeek.",
+        429 => "Terlalu banyak permintaan DeepSeek yang sedang berjalan.",
+        503 => "Layanan DeepSeek sedang sibuk. Coba lagi nanti.",
+        _ => "Transkripsi DeepSeek gagal. Periksa koneksi dan API key.",
+    }
+    .into()
+}
+
+async fn recognize_deepseek(
+    key: &str,
+    mut audio: mpsc::Receiver<Vec<u8>>,
+    sent: Arc<AtomicU64>,
+) -> Result<String, String> {
+    let mut pcm = Vec::new();
+    while let Some(chunk) = audio.recv().await {
+        pcm.extend_from_slice(&chunk);
+    }
+    if pcm.is_empty() {
+        return Ok(String::new());
+    }
+    // DeepSeek menagih durasi audio per detik (dibulatkan ke atas); catat sebelum kirim.
+    sent.store(pcm.len() as u64, Ordering::Relaxed);
+    let body = wav_multipart(&pcm);
+    drop(pcm);
+    let client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(8))
+        .timeout(Duration::from_secs(40))
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .map_err(|_| "TLS cloud gagal dibuat.")?;
+    let response = client
+        .post("https://api.deepseek.com/v1/tools/asr")
+        .header("authorization", format!("Bearer {key}"))
+        .header(
+            "content-type",
+            format!("multipart/form-data; boundary={BOUNDARY}"),
+        )
+        .body(body)
+        .send()
+        .await
+        .map_err(|e| {
+            if e.is_timeout() {
+                "Batas waktu DeepSeek terlampaui."
+            } else {
+                "DeepSeek tidak terhubung. Periksa internet."
+            }
+        })?;
+    if !response.status().is_success() {
+        return Err(deepseek_status(response.status().as_u16()));
+    }
+    let value: serde_json::Value = response
+        .json()
+        .await
+        .map_err(|_| "Respons DeepSeek tidak valid.")?;
+    let text = value["text"]
+        .as_str()
+        .ok_or("Respons DeepSeek tidak valid.")?;
+    Ok(crate::transcribe::join_segments([text.to_owned()]))
+}
+
 #[derive(Default, Serialize, Deserialize)]
 struct Usage {
     months: BTreeMap<String, BTreeMap<String, u64>>,
@@ -384,23 +526,23 @@ struct Reservation {
     month: String,
     project: String,
 }
-fn reserve(c: &GoogleConfig) -> Result<Reservation, String> {
+fn reserve(project: &str, monthly_limit_minutes: u32) -> Result<Reservation, String> {
     let mut usage = read_usage()?;
     let month = month();
     let seconds = usage
         .months
         .entry(month.clone())
         .or_default()
-        .entry(c.project.clone())
+        .entry(project.to_owned())
         .or_default();
-    if seconds.saturating_add(120) > u64::from(c.monthly_limit_minutes) * 60 {
+    if seconds.saturating_add(120) > u64::from(monthly_limit_minutes) * 60 {
         return Err("Batas bulanan tercapai atau sisa kurang dari 2 menit.".into());
     }
     *seconds += 120;
     save_usage(&usage)?;
     Ok(Reservation {
         month,
-        project: c.project.clone(),
+        project: project.to_owned(),
     })
 }
 fn settle(r: Reservation, seconds: u64) -> Result<(), String> {
@@ -556,6 +698,47 @@ mod tests {
         assert!(serde_json::to_value(&c).unwrap().get("enabled").is_none());
         c.region = "localhost".into();
         assert!(validate(&c).is_err());
+    }
+
+    #[test]
+    fn deepseek_wav_multipart_and_key_validation() {
+        let pcm = [1u8, 2, 3, 4];
+        let body = wav_multipart(&pcm);
+        let head = format!(
+            "--{BOUNDARY}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"speech.wav\"\r\nContent-Type: audio/wav\r\n\r\n"
+        );
+        let tail = format!("\r\n--{BOUNDARY}--\r\n");
+        assert!(body.starts_with(head.as_bytes()));
+        assert!(body.ends_with(tail.as_bytes()));
+        let wav = &body[head.len()..body.len() - tail.len()];
+        assert_eq!(&wav[0..4], b"RIFF");
+        assert_eq!(&wav[8..16], b"WAVEfmt ");
+        assert_eq!(u16::from_le_bytes([wav[20], wav[21]]), 1);
+        assert_eq!(u16::from_le_bytes([wav[22], wav[23]]), 1);
+        assert_eq!(u32::from_le_bytes(wav[24..28].try_into().unwrap()), 16000);
+        assert_eq!(u16::from_le_bytes([wav[34], wav[35]]), 16);
+        assert_eq!(&wav[36..40], b"data");
+        assert_eq!(u32::from_le_bytes(wav[40..44].try_into().unwrap()), 4);
+        assert_eq!(&wav[44..], &pcm);
+        assert!(
+            deepseek_key(&DeepSeekConfig {
+                api_key: "  sk-test-key  ".into(),
+                monthly_limit_minutes: 600,
+            })
+            .ok()
+            .is_some_and(|k| k == "sk-test-key" || std::env::var("DEEPSEEK_API_KEY").is_ok())
+        );
+        if std::env::var_os("DEEPSEEK_API_KEY").is_none() {
+            assert!(
+                deepseek_key(&DeepSeekConfig {
+                    api_key: "sk-spasi tengah".into(),
+                    monthly_limit_minutes: 600,
+                })
+                .is_err()
+            );
+        }
+        assert!(deepseek_status(401).contains("DEEPSEEK_API_KEY"));
+        assert!(deepseek_status(413).contains("8 MiB"));
     }
     #[test]
     #[ignore = "ADC dan FI_WHISPER_TEST_PROJECT diperlukan; memakai kuota Google"]

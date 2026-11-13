@@ -140,22 +140,22 @@ impl App {
             start_in_tray: std::env::args_os().any(|arg| arg == "--tray"),
             engine: config.engine,
             asr: config.asr_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model(config::ASR_DIR, config::ASR_FILE))
                     .flatten()
             }),
             qwen: config.qwen_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model_dir(config::QWEN_DIR))
                     .flatten()
             }),
             qwen17: config.qwen17_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model_dir(config::QWEN17_DIR))
                     .flatten()
             }),
             vad: config.vad_model.clone().or_else(|| {
-                (config.engine != Engine::GoogleChirp3)
+                (!config.engine.is_cloud())
                     .then(|| config::default_model(config::VAD_DIR, config::VAD_FILE))
                     .flatten()
             }),
@@ -194,11 +194,11 @@ impl App {
             Err(e) => app.tray_error = e,
         }
         app.refresh_mics();
-        if app.engine != Engine::GoogleChirp3 {
+        if !app.engine.is_cloud() {
             app.refresh_models();
         }
         app.push_settings();
-        if app.engine == Engine::GoogleChirp3 {
+        if app.engine.is_cloud() {
             app.activate_cloud();
         } else if let (Some(asr), Some(vad)) = (app.selected_asr(), app.vad.clone()) {
             app.core.send(Cmd::Load {
@@ -216,7 +216,7 @@ impl App {
             Engine::Whisper => self.asr.clone(),
             Engine::Qwen3Asr => self.qwen.clone(),
             Engine::Qwen3Asr17 => self.qwen17.clone(),
-            Engine::GoogleChirp3 => None,
+            Engine::GoogleChirp3 | Engine::DeepSeekAsr => None,
         }
     }
 
@@ -225,7 +225,9 @@ impl App {
             Engine::Whisper => &mut self.asr,
             Engine::Qwen3Asr => &mut self.qwen,
             Engine::Qwen3Asr17 => &mut self.qwen17,
-            Engine::GoogleChirp3 => unreachable!("Cloud tidak memiliki path model"),
+            Engine::GoogleChirp3 | Engine::DeepSeekAsr => {
+                unreachable!("Cloud tidak memiliki path model")
+            }
         };
         (path, &mut self.model_valid[engine as usize])
     }
@@ -261,10 +263,16 @@ impl App {
         if !self.config_error.is_empty() {
             return;
         }
-        if let Some(path) = &self.config_path
-            && let Err(e) = config::save(path, &self.config)
-        {
-            self.config_error = format!("Konfigurasi gagal disimpan: {e}");
+        if let Some(path) = &self.config_path {
+            if self.config.deepseek.api_key.is_empty()
+                && let Ok(Some(disk)) = config::load(path)
+                && !disk.deepseek.api_key.is_empty()
+            {
+                self.config.deepseek.api_key = disk.deepseek.api_key;
+            }
+            if let Err(e) = config::save(path, &self.config) {
+                self.config_error = format!("Konfigurasi gagal disimpan: {e}");
+            }
         }
     }
 
@@ -366,7 +374,7 @@ impl App {
                 {
                     let engine = loaded.unwrap_or(self.engine);
                     // Lewati badge mesin bila jendela terlalu sempit agar tidak menimpa judul.
-                    let text = if engine == Engine::GoogleChirp3 {
+                    let text = if engine.is_cloud() {
                         engine.short().to_owned()
                     } else {
                         format!("{}, {backend}", engine.short())
@@ -378,12 +386,11 @@ impl App {
                         .x
                         + 28.0;
                     if ui.available_width() >= width {
-                        let badge_color =
-                            if engine != Engine::GoogleChirp3 && backend.starts_with("CPU") {
-                                WARN
-                            } else {
-                                SECONDARY
-                            };
+                        let badge_color = if !engine.is_cloud() && backend.starts_with("CPU") {
+                            WARN
+                        } else {
+                            SECONDARY
+                        };
                         status_badge(ui, &text, badge_color, badge_color);
                     }
                 }
@@ -849,20 +856,23 @@ impl App {
                     }
                 },
             );
-            if previous != self.engine
-                && (previous == Engine::GoogleChirp3) != (self.engine == Engine::GoogleChirp3)
-            {
+            if previous != self.engine && (previous.is_cloud() || self.engine.is_cloud()) {
                 self.form_changed = Some(std::time::Instant::now());
             }
             let fade = 1.0 - flash_amount(ui, self.form_changed, 0.15);
             ui.multiply_opacity(0.65 + 0.35 * fade);
-            if self.engine == Engine::GoogleChirp3 {
+            if self.engine.is_cloud() {
                 if previous != self.engine {
                     self.config.engine = self.engine;
+                    self.cloud_usage = None;
                     self.save_config();
                     self.activate_cloud();
                 }
-                self.cloud_settings(ui);
+                if self.engine == Engine::DeepSeekAsr {
+                    self.deepseek_settings(ui);
+                } else {
+                    self.cloud_settings(ui);
+                }
                 return;
             }
             if response.clicked() || previous != self.engine {
@@ -921,7 +931,7 @@ impl App {
                         Engine::Whisper => self.config.asr_model = Some(asr.clone()),
                         Engine::Qwen3Asr => self.config.qwen_model = Some(asr.clone()),
                         Engine::Qwen3Asr17 => self.config.qwen17_model = Some(asr.clone()),
-                        Engine::GoogleChirp3 => unreachable!(),
+                        Engine::GoogleChirp3 | Engine::DeepSeekAsr => unreachable!(),
                     }
                     self.config.vad_model = Some(vad.clone());
                     self.save_config();
@@ -966,10 +976,108 @@ impl App {
 
     fn activate_cloud(&self) {
         self.core.send(Cmd::Google(self.config.google.clone()));
+        self.core.send(Cmd::DeepSeek(self.config.deepseek.clone()));
         self.core.send(Cmd::Load {
-            engine: Engine::GoogleChirp3,
+            engine: self.engine,
             asr: PathBuf::new(),
             vad: PathBuf::new(),
+        });
+    }
+
+    fn cloud_usage_label(&mut self, ui: &mut Ui, key: &str, limit: u32, rate: f64) {
+        let english = self.config.language == Language::English;
+        if self
+            .cloud_usage
+            .as_ref()
+            .is_none_or(|(at, k, _)| at.elapsed() >= Duration::from_secs(1) || k != key)
+        {
+            self.cloud_usage = Some((
+                std::time::Instant::now(),
+                key.to_owned(),
+                cloud::usage_seconds(key),
+            ));
+        }
+        ui.add_space(2.0);
+        match self.cloud_usage.as_ref().unwrap().2.clone() {
+            Ok(seconds) => {
+                let minutes = seconds as f64 / 60.0;
+                let near_limit = minutes >= f64::from(limit) * 0.8;
+                ui.label(
+                    RichText::new(if english {
+                        format!(
+                            "This month: {minutes:.1} min | est. US${:.2}",
+                            minutes * rate
+                        )
+                    } else {
+                        format!(
+                            "Bulan ini: {minutes:.1} menit | estimasi US${:.2}",
+                            minutes * rate
+                        )
+                    })
+                    .small()
+                    .color(if near_limit { WARN } else { SECONDARY }),
+                );
+            }
+            Err(e) => {
+                ui.label(RichText::new(e).small().color(DANGER));
+            }
+        }
+    }
+
+    fn deepseek_settings(&mut self, ui: &mut Ui) {
+        let english = self.config.language == Language::English;
+        let t = |id, en| if english { en } else { id };
+        field_label(ui, t("Batas / bulan", "Monthly limit"));
+        let width = ui.available_width();
+        let changed = interactive(ui, |ui| {
+            ui.add_sized(
+                [width, 34.0],
+                egui::DragValue::new(&mut self.config.deepseek.monthly_limit_minutes)
+                    .range(0..=60000)
+                    .suffix(t(" menit", " min")),
+            )
+        })
+        .changed();
+        if changed {
+            self.save_config();
+            self.core.send(Cmd::DeepSeek(self.config.deepseek.clone()));
+        }
+        let limit = self.config.deepseek.monthly_limit_minutes;
+        self.cloud_usage_label(ui, cloud::DEEPSEEK_USAGE_KEY, limit, 0.116 / 60.0);
+        interactive(ui, |ui| {
+            egui::CollapsingHeader::new(RichText::new("Setup API Key").small().color(SECONDARY))
+                .id_salt("setup-api-key")
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(t(
+                            "Jalankan di terminal, lalu mulai ulang aplikasi:",
+                            "Run in a terminal, then restart the app:",
+                        ))
+                        .small()
+                        .color(SECONDARY),
+                    );
+                    inset(false).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new("setx DEEPSEEK_API_KEY \"API_KEY\"")
+                                    .monospace()
+                                    .size(11.5)
+                                    .color(TEXT),
+                            )
+                            .selectable(true),
+                        );
+                    });
+                    ui.label(
+                        RichText::new(t(
+                            "Atau isi deepseek.api_key di config.json. Penghitung lokal bukan tagihan DeepSeek. Bulan mengikuti UTC. Sisa minimal 2 menit untuk memulai sesi.",
+                            "Or set deepseek.api_key in config.json. Local counter, not your DeepSeek bill. Months use UTC. At least 2 minutes must remain to start a session.",
+                        ))
+                        .small()
+                        .color(SECONDARY),
+                    );
+                })
+                .header_response
         });
     }
 
@@ -1026,41 +1134,9 @@ impl App {
             self.save_config();
             self.core.send(Cmd::Google(self.config.google.clone()));
         }
-        if self.cloud_usage.as_ref().is_none_or(|(at, project, _)| {
-            at.elapsed() >= Duration::from_secs(1) || project != &self.config.google.project
-        }) {
-            self.cloud_usage = Some((
-                std::time::Instant::now(),
-                self.config.google.project.clone(),
-                cloud::usage_seconds(&self.config.google.project),
-            ));
-        }
-        ui.add_space(2.0);
-        match self.cloud_usage.as_ref().unwrap().2.clone() {
-            Ok(seconds) => {
-                let minutes = seconds as f64 / 60.0;
-                let near_limit =
-                    minutes >= f64::from(self.config.google.monthly_limit_minutes) * 0.8;
-                ui.label(
-                    RichText::new(if english {
-                        format!(
-                            "This month: {minutes:.1} min | est. US${:.2}",
-                            minutes * 0.016
-                        )
-                    } else {
-                        format!(
-                            "Bulan ini: {minutes:.1} menit | estimasi US${:.2}",
-                            minutes * 0.016
-                        )
-                    })
-                    .small()
-                    .color(if near_limit { WARN } else { SECONDARY }),
-                );
-            }
-            Err(e) => {
-                ui.label(RichText::new(e).small().color(DANGER));
-            }
-        }
+        let project = self.config.google.project.clone();
+        let limit = self.config.google.monthly_limit_minutes;
+        self.cloud_usage_label(ui, &project, limit, 0.016);
         interactive(ui, |ui| {
             egui::CollapsingHeader::new(RichText::new("Setup ADC").small().color(SECONDARY))
                 .id_salt("setup-adc")
@@ -1693,6 +1769,51 @@ fn message(text: &str, english: bool) -> String {
         (
             "Google Cloud tidak terhubung. Periksa internet.",
             "Cannot connect to Google Cloud. Check your internet.",
+        ),
+        (
+            "API key DeepSeek belum tersedia. Buka Setup API Key.",
+            "DeepSeek API key unavailable. Open Setup API Key.",
+        ),
+        ("API key DeepSeek tidak valid.", "Invalid DeepSeek API key."),
+        (
+            "API key DeepSeek ditolak. Periksa DEEPSEEK_API_KEY.",
+            "DeepSeek API key rejected. Check DEEPSEEK_API_KEY.",
+        ),
+        (
+            "Saldo DeepSeek tidak mencukupi.",
+            "Insufficient DeepSeek balance.",
+        ),
+        (
+            "Format audio ditolak DeepSeek.",
+            "Audio format rejected by DeepSeek.",
+        ),
+        (
+            "Batas waktu DeepSeek terlampaui.",
+            "DeepSeek request timed out.",
+        ),
+        (
+            "Ukuran audio melebihi batas 8 MiB DeepSeek.",
+            "Audio exceeds DeepSeek 8 MiB limit.",
+        ),
+        (
+            "Terlalu banyak permintaan DeepSeek yang sedang berjalan.",
+            "Too many DeepSeek requests in progress.",
+        ),
+        (
+            "Layanan DeepSeek sedang sibuk. Coba lagi nanti.",
+            "DeepSeek service is busy. Try again later.",
+        ),
+        (
+            "DeepSeek tidak terhubung. Periksa internet.",
+            "Cannot connect to DeepSeek. Check your internet.",
+        ),
+        (
+            "Respons DeepSeek tidak valid.",
+            "Invalid response from DeepSeek.",
+        ),
+        (
+            "Transkripsi DeepSeek gagal. Periksa koneksi dan API key.",
+            "DeepSeek transcription failed. Check your connection and API key.",
         ),
         (
             "Mikrofon pilihan tidak ditemukan. Pilih ulang atau gunakan default sistem.",

@@ -28,14 +28,17 @@ pub enum Engine {
     Qwen3Asr17,
     #[serde(rename = "google-chirp-3")]
     GoogleChirp3,
+    #[serde(rename = "deepseek-asr")]
+    DeepSeekAsr,
 }
 
 impl Engine {
-    pub const ALL: [Self; 4] = [
+    pub const ALL: [Self; 5] = [
         Self::Whisper,
         Self::Qwen3Asr,
         Self::Qwen3Asr17,
         Self::GoogleChirp3,
+        Self::DeepSeekAsr,
     ];
 
     pub fn label(self) -> &'static str {
@@ -44,6 +47,7 @@ impl Engine {
             Self::Qwen3Asr => "Qwen3-ASR 0.6B",
             Self::Qwen3Asr17 => "Qwen3-ASR 1.7B",
             Self::GoogleChirp3 => "Google Cloud - Chirp 3",
+            Self::DeepSeekAsr => "DeepSeek ASR",
         }
     }
 
@@ -53,11 +57,16 @@ impl Engine {
             Self::Qwen3Asr => "Qwen3 0.6B",
             Self::Qwen3Asr17 => "Qwen3 1.7B",
             Self::GoogleChirp3 => "Chirp 3",
+            Self::DeepSeekAsr => "DeepSeek",
         }
     }
 
     pub fn is_qwen(self) -> bool {
         matches!(self, Self::Qwen3Asr | Self::Qwen3Asr17)
+    }
+
+    pub fn is_cloud(self) -> bool {
+        matches!(self, Self::GoogleChirp3 | Self::DeepSeekAsr)
     }
 
     /// Lokasi model bawaan relatif ke `models\` (file untuk Whisper, folder untuk Qwen).
@@ -66,7 +75,7 @@ impl Engine {
             Self::Whisper => r"whisper-large-v3-turbo\ggml-large-v3-turbo.bin",
             Self::Qwen3Asr => QWEN_DIR,
             Self::Qwen3Asr17 => QWEN17_DIR,
-            Self::GoogleChirp3 => "",
+            Self::GoogleChirp3 | Self::DeepSeekAsr => "",
         }
     }
 }
@@ -123,6 +132,7 @@ impl Language {
 #[serde(default)]
 pub struct Config {
     pub google: GoogleConfig,
+    pub deepseek: DeepSeekConfig,
     pub engine: Engine,
     pub asr_model: Option<PathBuf>,
     /// Folder model Qwen3-ASR 0.6B.
@@ -143,6 +153,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             google: GoogleConfig::default(),
+            deepseek: DeepSeekConfig::default(),
             engine: Engine::Whisper,
             asr_model: None,
             qwen_model: None,
@@ -319,6 +330,9 @@ mod tests {
         assert_eq!(config.engine, Engine::Qwen3Asr);
         let config: Config = serde_json::from_str(r#"{"engine":"qwen3-asr-1.7b"}"#).unwrap();
         assert_eq!(config.engine, Engine::Qwen3Asr17);
+        let config: Config = serde_json::from_str(r#"{"engine":"deepseek-asr"}"#).unwrap();
+        assert_eq!(config.engine, Engine::DeepSeekAsr);
+        assert_eq!(config.deepseek.monthly_limit_minutes, 600);
         assert_eq!(config.shortcut, "Ctrl+Alt+Space");
         assert!(config.close_to_tray);
         assert!(!config.auto_startup);
@@ -341,6 +355,21 @@ impl Default for GoogleConfig {
         Self {
             project: String::new(),
             region: "us".into(),
+            monthly_limit_minutes: 600,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DeepSeekConfig {
+    pub api_key: String,
+    pub monthly_limit_minutes: u32,
+}
+impl Default for DeepSeekConfig {
+    fn default() -> Self {
+        Self {
+            api_key: String::new(),
             monthly_limit_minutes: 600,
         }
     }

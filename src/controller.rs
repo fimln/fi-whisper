@@ -59,6 +59,7 @@ pub struct Status {
 pub enum Cmd {
     Shutdown,
     Google(crate::config::GoogleConfig),
+    DeepSeek(crate::config::DeepSeekConfig),
     CloudFinished {
         session: u64,
         result: Result<String, String>,
@@ -151,6 +152,7 @@ struct Controller {
     status: Arc<Mutex<Status>>,
     worker: Worker,
     google: crate::config::GoogleConfig,
+    deepseek: crate::config::DeepSeekConfig,
     cloud: Option<cloud::Session>,
     worker_gen: u64,
     mic: Option<String>,
@@ -202,6 +204,7 @@ impl Controller {
         Self {
             worker: spawn_worker(&tx, 0),
             google: Default::default(),
+            deepseek: Default::default(),
             cloud: None,
             worker_gen: 0,
             tx,
@@ -275,6 +278,11 @@ impl Controller {
             Cmd::Google(settings) => {
                 if !self.st().phase.busy() {
                     self.google = settings;
+                }
+            }
+            Cmd::DeepSeek(settings) => {
+                if !self.st().phase.busy() {
+                    self.deepseek = settings;
                 }
             }
             Cmd::CloudFinished { session, result } => {
@@ -395,19 +403,21 @@ impl Controller {
         self.cancelling = false;
         let session = self.session;
         let tx = self.tx.clone();
-        let cloud = self
-            .st()
-            .loaded
-            .as_ref()
-            .is_some_and(|x| x.0 == Engine::GoogleChirp3);
+        let engine = self.st().loaded.as_ref().map(|x| x.0);
         let on_end = move |end| {
             let _ = tx.send(Cmd::Captured { session, end });
         };
-        let capture = if cloud {
+        let capture = if engine.is_some_and(Engine::is_cloud) {
             let tx = self.tx.clone();
-            match cloud::Session::start(self.google.clone(), self.language, move |result| {
+            let done = move |result| {
                 let _ = tx.send(Cmd::CloudFinished { session, result });
-            }) {
+            };
+            let cloud = if engine == Some(Engine::DeepSeekAsr) {
+                cloud::Session::start_deepseek(self.deepseek.clone(), done)
+            } else {
+                cloud::Session::start(self.google.clone(), self.language, done)
+            };
+            match cloud {
                 Ok(session) => {
                     let sink = session.audio.as_ref().unwrap().clone();
                     self.cloud = Some(session);
@@ -639,7 +649,7 @@ impl Controller {
                 took,
             } => {
                 let mut st = self.st();
-                st.phase = if engine == Engine::GoogleChirp3 {
+                st.phase = if engine.is_cloud() {
                     Phase::CloudIdle
                 } else {
                     Phase::Ready
@@ -674,11 +684,7 @@ impl Controller {
                     .map_or(timing.vad + timing.asr, |t| t.elapsed());
                 let target = self.target.take();
                 let mut st = self.st();
-                st.phase = if st
-                    .loaded
-                    .as_ref()
-                    .is_some_and(|x| x.0 == Engine::GoogleChirp3)
-                {
+                st.phase = if st.loaded.as_ref().is_some_and(|x| x.0.is_cloud()) {
                     Phase::CloudIdle
                 } else {
                     Phase::Ready
