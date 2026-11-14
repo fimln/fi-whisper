@@ -1691,7 +1691,8 @@ fn main() -> eframe::Result {
                 .with_inner_size([700.0, 700.0])
                 .with_min_inner_size([560.0, 600.0])
                 .with_decorations(false)
-                .with_taskbar(!std::env::args_os().any(|arg| arg == "--tray"))
+                // Tray memakai SW_HIDE; taskbar tetap aktif saat jendela dibuka kembali.
+                .with_taskbar(true)
                 .with_icon(theme::icon()),
             renderer: eframe::Renderer::Glow,
             centered: true,
