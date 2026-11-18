@@ -498,7 +498,7 @@ fn push_frames<T>(
     if let Ok(chunk) = producer.write_chunk_uninit(count) {
         chunk.fill_from_iter(mono_frames);
     } else {
-        // Keep accepting frames while the consumer frees space near capacity.
+        // Jika satu blok tidak muat, isi slot yang tersedia sampai satu frame gagal ditulis.
         for mono in mono_frames {
             if producer.push(mono).is_err() {
                 overflow.store(true, Ordering::Relaxed);

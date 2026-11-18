@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/status-early%20alpha-D4A72C?style=flat-square&labelColor=555555" alt="Status early alpha">
 </p>
 
-<p align="center">Automatic Speech Recognition (ASR) software for Windows. Run locally without internet, or use Google Chirp. Built with Rust. Because your rambling is your business, i give you zero telemetry.</p>
+<p align="center">Windows dictation in Rust. Run offline or use Google Chirp 3 or DeepSeek ASR. Zero telemetry.</p>
 
 <p align="center"><img src="assets/screenshot.png" width="620" alt="fi-whisper window: Dictation, Last result, Settings, and Model"></p>
 
@@ -37,7 +37,7 @@ flowchart LR
     K[Global shortcut / Start button] --> C[Controller<br/>thread]
     M[Microphone<br/>cpal] -->|PCM 16 kHz| C
     C --> W[ASR worker]
-    C -->|cloud dictation started| G[Google Cloud Chirp 3<br/>ADC + streaming STT V2]
+    C --> G[Chirp 3 streams PCM / DeepSeek uploads WAV after stop]
     G -->|final text| C
     W --> V[Silero VAD<br/>whisper.cpp]
     V -->|speech segments| E{ASR engine}
@@ -65,11 +65,11 @@ cargo build --locked --release                         # CPU
 ./scripts/package.ps1                                  # dist/fi-whisper: exe, CUDA DLLs, logo, licenses
 ```
 
-### Google Cloud Chirp 3
+### Cloud setup
 
 Select **Google Cloud - Chirp 3**, enter your Project ID and region (`us` or `eu`), then start dictation to send audio to Google. The project needs active billing. The ADC account needs Speech Client and permission to use the quota project.
 
-Initial setup with the Google Cloud CLI:
+For DeepSeek, set the `DEEPSEEK_API_KEY` environment variable or configure `deepseek.api_key`. For Google, set up ADC:
 
 ```powershell
 gcloud services enable speech.googleapis.com --project=PROJECT_ID
