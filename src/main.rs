@@ -49,6 +49,7 @@ struct App {
     default_mic: Option<String>,
     mic_error: String,
     shortcut_input: String,
+    vocabulary_draft: Option<String>,
     shortcut_error: String,
     hotkeys: Option<windows::Hotkeys>,
     tray: Option<windows::Tray>,
@@ -100,8 +101,8 @@ impl App {
 
         // Handler hotkey/tray berjalan di message loop thread utama, juga saat jendela tersembunyi.
         let tx = core.tx.clone();
-        let hotkeys = windows::Hotkeys::new(move || {
-            let _ = tx.send(Cmd::Toggle(Source::Hotkey));
+        let hotkeys = windows::Hotkeys::new(move |pressed| {
+            let _ = tx.send(Cmd::Hotkey(pressed));
         });
         let (tx, win, ctx) = (core.tx.clone(), window.clone(), cc.egui_ctx.clone());
         let tray = windows::create_tray(move |action| match action {
@@ -159,6 +160,7 @@ impl App {
                     .then(|| config::default_model(config::VAD_DIR, config::VAD_FILE))
                     .flatten()
             }),
+            vocabulary_draft: None,
             shortcut_input: config.shortcut.clone(),
             model_valid: [false; 4],
             config,
@@ -283,6 +285,8 @@ impl App {
         self.core.send(Cmd::Settings {
             mic: self.config.microphone.clone(),
             language: self.config.language,
+            hold_to_talk: self.config.hold_to_talk,
+            vocabulary: self.config.vocabulary.clone(),
         });
     }
 
@@ -472,6 +476,11 @@ impl App {
             if primary(ui, enabled, recording, label).clicked() {
                 self.core.send(Cmd::Toggle(Source::Gui));
             }
+            if !matches!(phase, Phase::Recording | Phase::Transcribing)
+                && secondary(ui, true, t("Kosakata", "Vocabulary")).clicked()
+            {
+                self.vocabulary_draft = Some(self.config.vocabulary.clone());
+            }
             if matches!(phase, Phase::Recording | Phase::Transcribing)
                 && secondary(ui, true, t("Batalkan", "Cancel")).clicked()
             {
@@ -501,6 +510,38 @@ impl App {
                 .small()
                 .color(SECONDARY),
             );
+        }
+    }
+
+    fn vocabulary_dialog(&mut self, ctx: &egui::Context) {
+        let english = self.config.language == Language::English;
+        let t = |id, en| if english { en } else { id };
+        let Some(draft) = &mut self.vocabulary_draft else {
+            return;
+        };
+        let mut save = false;
+        let dialog = egui::Modal::new(egui::Id::unique("vocabulary-dialog")).show(ctx, |ui| {
+            ui.set_width(310.0);
+            title(ui, t("Kosakata", "Vocabulary"));
+            ui.label(t("Tulis nama atau istilah untuk Whisper dan Qwen, satu per baris (maks. 512 karakter).",
+                       "Enter names or terms for Whisper and Qwen, one per line (max. 512 characters)."));
+            egui::ScrollArea::vertical().max_height(175.0).show(ui, |ui| {
+                ui.add(egui::TextEdit::multiline(draft).desired_width(f32::INFINITY).desired_rows(5).char_limit(512));
+            });
+            ui.horizontal(|ui| {
+                if secondary(ui, true, t("Simpan", "Save")).clicked() {
+                    save = true;
+                    ui.close();
+                }
+                if secondary(ui, true, t("Batal", "Cancel")).clicked() { ui.close(); }
+            });
+        });
+        if save {
+            self.config.vocabulary = self.vocabulary_draft.take().unwrap_or_default();
+            self.save_config();
+            self.push_settings();
+        } else if dialog.should_close() {
+            self.vocabulary_draft = None;
         }
     }
 
@@ -748,6 +789,14 @@ impl App {
                     self.apply_shortcut();
                 }
             });
+        });
+        ui.add_enabled_ui(idle, |ui| {
+            changed |= ui
+                .checkbox(
+                    &mut self.config.hold_to_talk,
+                    t("Tahan shortcut untuk bicara", "Hold shortcut to talk"),
+                )
+                .changed();
         });
         if !self.mic_error.is_empty() {
             ui.label(
@@ -1232,6 +1281,15 @@ impl App {
         left: fn(&mut Self, &mut Ui),
         right: fn(&mut Self, &mut Ui),
     ) {
+        if ui.available_width() < 600.0 {
+            for add in [left, right] {
+                card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    add(self, ui);
+                });
+            }
+            return;
+        }
         let previous = self.rows[index];
         // Baris atas tetap stabil saat tinggi form pada baris bawah berubah.
         let target = if index == 0 {
@@ -1590,7 +1648,11 @@ impl eframe::App for App {
                         // Koreksi linear dari frame ini; stabil setelah satu pass tambahan.
                         // Dibulatkan ke bawah agar pembulatan piksel tidak memunculkan scrollbar.
                         let used = ui.min_rect().height();
-                        let extra = (self.extra + available - used - 1.0).max(0.0).floor();
+                        let extra = if ui.available_width() < 600.0 {
+                            0.0
+                        } else {
+                            (self.extra + available - used - 1.0).max(0.0).floor()
+                        };
                         if (extra - self.extra).abs() >= 1.0 {
                             self.extra = extra;
                             ui.ctx().request_discard("extra height");
@@ -1605,6 +1667,7 @@ impl eframe::App for App {
             egui::StrokeKind::Inside,
         );
         resize_edges(root);
+        self.vocabulary_dialog(root.ctx());
     }
 }
 

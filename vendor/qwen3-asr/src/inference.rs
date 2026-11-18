@@ -43,6 +43,8 @@ pub(crate) const TOK_ASSISTANT: i64 = 77091;  // "assistant"
 pub struct TranscribeOptions {
     /// Force a specific language (e.g. `"english"`). `None` enables auto-detection.
     pub language: Option<String>,
+    /// Optional vocabulary supplied in the system turn.
+    pub context: String,
     /// Maximum number of new tokens to generate. Default: 512.
     pub max_new_tokens: usize,
     /// fi-whisper: checked between encoder operations and encoder/decoder layers; `true` aborts with
@@ -52,7 +54,7 @@ pub struct TranscribeOptions {
 
 impl Default for TranscribeOptions {
     fn default() -> Self {
-        Self { language: None, max_new_tokens: 512, abort: None }
+        Self { context: String::new(), language: None, max_new_tokens: 512, abort: None }
     }
 }
 
@@ -248,6 +250,7 @@ impl AsrInferenceInner {
         let generated_ids = self.generate_with_abort(
             &audio_embeds,
             options.language.as_deref(),
+            &options.context,
             None, // no prefix
             options.max_new_tokens,
             &aborted,
@@ -283,13 +286,14 @@ impl AsrInferenceInner {
         prefix_text: Option<&str>,
         max_new_tokens: usize,
     ) -> anyhow::Result<Vec<u32>> {
-        self.generate_with_abort(audio_embeds, language, prefix_text, max_new_tokens, &|| false)
+        self.generate_with_abort(audio_embeds, language, "", prefix_text, max_new_tokens, &|| false)
     }
 
     pub(crate) fn generate_with_abort(
         &self,
         audio_embeds: &Tensor,
         language: Option<&str>,
+        context: &str,
         prefix_text: Option<&str>,
         max_new_tokens: usize,
         aborted: &dyn Fn() -> bool,
@@ -299,7 +303,7 @@ impl AsrInferenceInner {
 
         // Build prompt token IDs (with optional prefix)
         let (input_ids, audio_start_pos) =
-            self.build_prompt(num_audio_tokens, language, prefix_text)?;
+            self.build_prompt(num_audio_tokens, language, context, prefix_text)?;
         let seq_len = input_ids.len();
 
         // Build embeddings, inject audio at the audio pad positions
@@ -478,20 +482,23 @@ impl AsrInferenceInner {
         &self,
         num_audio_tokens: usize,
         language: Option<&str>,
+        context: &str,
         prefix_text: Option<&str>,
     ) -> anyhow::Result<(Vec<i64>, usize)> {
         let cfg = &self.config.thinker_config;
-        let mut tokens: Vec<i64> = vec![
-            TOK_IM_START,
-            TOK_SYSTEM,
-            TOK_NEWLINE,
+        let mut tokens = vec![TOK_IM_START, TOK_SYSTEM, TOK_NEWLINE];
+        if !context.is_empty() {
+            let enc = self.tokenizer.encode(context, false).map_err(|e| anyhow::anyhow!("encode vocabulary: {}", e))?;
+            tokens.extend(enc.get_ids().iter().map(|&id| i64::from(id)));
+        }
+        tokens.extend_from_slice(&[
             TOK_IM_END,
             TOK_NEWLINE,
             TOK_IM_START,
             TOK_USER,
             TOK_NEWLINE,
             cfg.audio_start_token_id,
-        ];
+        ]);
 
         let audio_start_pos = tokens.len();
         tokens.extend(std::iter::repeat_n(cfg.audio_token_id, num_audio_tokens));
@@ -702,14 +709,14 @@ mod tests {
         let embeds = inner.audio_encoder.forward_with_abort(&mel, &|| false).unwrap();
         checks.set(0);
         // Generation entry, prefill, decoder entry, then two layer boundaries.
-        let error = inner.generate_with_abort(&embeds, Some("Indonesian"), None, 1, &|| {
+        let error = inner.generate_with_abort(&embeds, Some("Indonesian"), "", None, 1, &|| {
             checks.set(checks.get() + 1);
             checks.get() == 5
         }).unwrap_err();
         assert!(error.downcast_ref::<Cancelled>().is_some(), "{error:#}");
         assert_eq!(checks.get(), 5);
         // Partial prefill cache must not contaminate the next inference.
-        inner.generate_with_abort(&embeds, Some("Indonesian"), None, 1, &|| false).unwrap();
+        inner.generate_with_abort(&embeds, Some("Indonesian"), "", None, 1, &|| false).unwrap();
     }
 
     #[test]

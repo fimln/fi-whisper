@@ -65,6 +65,7 @@ pub enum Cmd {
         result: Result<String, String>,
     },
     Toggle(Source),
+    Hotkey(bool),
     Cancel,
     Load {
         engine: Engine,
@@ -73,6 +74,8 @@ pub enum Cmd {
     },
     Settings {
         mic: Option<String>,
+        hold_to_talk: bool,
+        vocabulary: String,
         language: Language,
     },
     ClearResult,
@@ -155,6 +158,9 @@ struct Controller {
     deepseek: crate::config::DeepSeekConfig,
     cloud: Option<cloud::Session>,
     worker_gen: u64,
+    hold_to_talk: bool,
+    held_session: Option<u64>,
+    vocabulary: String,
     mic: Option<String>,
     language: Language,
     /// ID sesi aktif; hasil dengan ID lain diabaikan.
@@ -210,6 +216,9 @@ impl Controller {
             tx,
             status,
             mic: None,
+            hold_to_talk: false,
+            held_session: None,
+            vocabulary: String::new(),
             language: Language::Indonesian,
             session: 0,
             capture: None,
@@ -318,6 +327,21 @@ impl Controller {
                     timing,
                 });
             }
+            Cmd::Hotkey(pressed) => {
+                let recording = self.st().phase == Phase::Recording;
+                if pressed {
+                    if !self.hold_to_talk {
+                        self.toggle(Source::Hotkey);
+                    } else if !recording {
+                        self.toggle(Source::Hotkey);
+                        if self.st().phase == Phase::Recording {
+                            self.held_session = Some(self.session);
+                        }
+                    }
+                } else if self.held_session.take() == Some(self.session) && recording {
+                    self.stop();
+                }
+            }
             Cmd::Toggle(source) => self.toggle(source),
             Cmd::Cancel => self.cancel(),
             Cmd::Load { engine, asr, vad } => {
@@ -341,8 +365,24 @@ impl Controller {
                 drop(st);
                 self.send_job(Job::Load { engine, asr, vad });
             }
-            Cmd::Settings { mic, language } => {
+            Cmd::Settings {
+                mic,
+                language,
+                vocabulary,
+                hold_to_talk,
+            } => {
                 self.mic = mic;
+                self.hold_to_talk = hold_to_talk;
+                self.vocabulary = vocabulary
+                    .chars()
+                    .take(512)
+                    .filter(|c| *c != '\0')
+                    .collect::<String>()
+                    .lines()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .collect::<Vec<_>>()
+                    .join(", ");
                 self.language = language;
             }
             Cmd::ClearResult => {
@@ -563,6 +603,7 @@ impl Controller {
                     session,
                     samples: rec.samples,
                     language: self.language,
+                    vocabulary: self.vocabulary.clone(),
                 });
             }
             CaptureEnd::Cancelled => {}
@@ -737,6 +778,24 @@ mod tests {
             outcome: Outcome::Text("test".into()),
             timing: Timing::default(),
         }
+    }
+
+    #[test]
+    fn hold_release_only_stops_its_own_recording() {
+        let (tx, _rx) = mpsc::channel();
+        let mut c = Controller::new(tx);
+        c.hold_to_talk = true;
+        c.session = 3;
+        c.st().phase = Phase::Recording;
+        c.handle(Cmd::Hotkey(true));
+        c.handle(Cmd::Hotkey(false));
+        assert_eq!(c.st().phase, Phase::Recording);
+        c.held_session = Some(2);
+        c.handle(Cmd::Hotkey(false));
+        assert_eq!(c.st().phase, Phase::Recording);
+        c.held_session = Some(3);
+        c.handle(Cmd::Hotkey(false));
+        assert_eq!(c.st().phase, Phase::Transcribing);
     }
 
     #[test]

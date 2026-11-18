@@ -144,6 +144,8 @@ pub struct Config {
     pub microphone: Option<String>,
     pub language: Language,
     pub shortcut: String,
+    pub hold_to_talk: bool,
+    pub vocabulary: String,
     /// `true`: tombol close menyembunyikan jendela ke tray. `false`: keluar dari aplikasi.
     pub close_to_tray: bool,
     pub auto_startup: bool,
@@ -161,6 +163,8 @@ impl Default for Config {
             vad_model: None,
             microphone: None,
             language: Language::Indonesian,
+            hold_to_talk: false,
+            vocabulary: String::new(),
             shortcut: "Ctrl+Alt+Space".into(),
             close_to_tray: true,
             auto_startup: false,

@@ -49,7 +49,7 @@ flowchart LR
 ```
 ## Usage
 
-Press the shortcut, talk, then press it again to stop. Your words land in the target app. Recording stops automatically after two minutes, audio and results stay in RAM. The GUI button keeps results inside fi-whisper for manual copying.
+Press the shortcut, talk, then press it again to stop. Enable **Hold shortcut to talk** in Settings to record while holding the shortcut and finish on release. **Vocabulary** next to **Start dictation** accepts names and terms, one per line, for local Whisper and Qwen recognition. Your words land in the target app. Recording stops automatically after two minutes, audio and results stay in RAM. The GUI button keeps results inside fi-whisper for manual copying.
 
 Settings (engine, models, microphone, language, shortcut) live in `%LOCALAPPDATA%\fi-whisper\config.json`. Choose whether closing the window hides it to the tray or quits. Select **English (US)** under Language to switch the interface to English and use English recognition.
 

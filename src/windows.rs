@@ -448,7 +448,7 @@ unsafe fn set_data(format: u32, data: &[u16]) -> Result<(), String> {
 
 // --- Hotkey global ---
 
-type HotkeyCallback = dyn Fn() + Send + Sync;
+type HotkeyCallback = dyn Fn(bool) + Send + Sync;
 // Setter dependency memakai OnceCell; handler tetap hanya meneruskan ke pemilik yang masih hidup.
 static HOTKEY_CALLBACK: Mutex<Option<Weak<HotkeyCallback>>> = Mutex::new(None);
 
@@ -458,10 +458,8 @@ fn hotkey_event(e: GlobalHotKeyEvent) {
         .unwrap()
         .as_ref()
         .and_then(Weak::upgrade);
-    if e.state() == HotKeyState::Pressed
-        && let Some(callback) = callback
-    {
-        callback();
+    if let Some(callback) = callback {
+        callback(e.state() == HotKeyState::Pressed);
     }
 }
 
@@ -473,10 +471,10 @@ pub struct Hotkeys {
 }
 
 impl Hotkeys {
-    pub fn new(on_press: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
+    pub fn new(on_event: impl Fn(bool) + Send + Sync + 'static) -> Result<Self, String> {
         let manager = GlobalHotKeyManager::new()
             .map_err(|e| format!("Shortcut global tidak tersedia: {e}"))?;
-        let callback: Arc<HotkeyCallback> = Arc::new(on_press);
+        let callback: Arc<HotkeyCallback> = Arc::new(on_event);
         *HOTKEY_CALLBACK.lock().unwrap() = Some(Arc::downgrade(&callback));
         GlobalHotKeyEvent::set_event_handler(Some(hotkey_event));
         Ok(Self {
@@ -704,7 +702,7 @@ mod tests {
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         for expected in 1..=2 {
             let target = calls.clone();
-            let hotkeys = Hotkeys::new(move || {
+            let hotkeys = Hotkeys::new(move |_| {
                 target.fetch_add(1, Ordering::SeqCst);
             })
             .unwrap();
