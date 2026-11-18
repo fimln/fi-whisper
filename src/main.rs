@@ -1765,7 +1765,7 @@ fn main() -> eframe::Result {
         "fi-whisper",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([700.0, 700.0])
+                .with_inner_size([700.0, 736.0])
                 .with_min_inner_size([560.0, 600.0])
                 .with_decorations(false)
                 // Tray memakai SW_HIDE; taskbar tetap aktif saat jendela dibuka kembali.
