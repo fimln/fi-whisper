@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::Duration;
 use theme::*;
 
+const STACKED_LAYOUT_WIDTH: f32 = 600.0;
+
 /// Kondisi lintas thread untuk handler tray/hotkey.
 struct Window {
     hwnd: AtomicIsize,
@@ -462,26 +464,37 @@ impl App {
         meter(
             ui,
             recording,
-            matches!(phase, Phase::Loading | Phase::Transcribing),
+            matches!(
+                phase,
+                Phase::Loading | Phase::Starting | Phase::Transcribing
+            ),
             self.level,
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             let vocabulary_label = t("Kosakata", "Vocabulary");
-            let width = ui
-                .painter()
-                .layout_no_wrap(vocabulary_label.to_owned(), medium(14.0), TEXT)
-                .size()
-                .x
+            let start = t("Mulai dikte", "Start dictation");
+            let done = t("Selesai", "Done");
+            let processing = t("Memproses…", "Processing…");
+            let loading = t("Memuat…", "Loading…");
+            let width = [start, done, processing, loading, vocabulary_label]
+                .into_iter()
+                .map(|text| {
+                    ui.painter()
+                        .layout_no_wrap(text.to_owned(), medium(14.0), TEXT)
+                        .size()
+                        .x
+                })
+                .fold(0.0, f32::max)
                 .ceil()
                 + 2.0
                     * (ui.spacing().button_padding.x
                         + ui.visuals().widgets.inactive.bg_stroke.width);
             let (enabled, label) = match phase {
-                Phase::Recording => (true, t("Selesai", "Done")),
-                Phase::Transcribing => (false, t("Memproses…", "Processing…")),
-                Phase::Loading => (false, t("Memuat…", "Loading…")),
-                _ => (ready, t("Mulai dikte", "Start dictation")),
+                Phase::Recording => (true, done),
+                Phase::Transcribing => (false, processing),
+                Phase::Loading | Phase::Starting => (false, loading),
+                _ => (ready, start),
             };
             if primary(ui, enabled, recording, width, label).clicked() {
                 self.core.send(Cmd::Toggle(Source::Gui));
@@ -1254,7 +1267,7 @@ impl App {
             );
             if secondary(
                 ui,
-                true,
+                !self.core.status().phase.busy(),
                 t("Reset konfigurasi ke default", "Reset configuration"),
             )
             .clicked()
@@ -1276,7 +1289,13 @@ impl App {
         let Some(hotkeys) = self.hotkeys.as_mut() else {
             return;
         };
-        match hotkeys.set(&self.shortcut_input) {
+        let status = self.core.status();
+        if status.phase.busy() {
+            return;
+        }
+        let result = hotkeys.set(&self.shortcut_input);
+        drop(status);
+        match result {
             Ok(()) => {
                 self.shortcut_error.clear();
                 self.config.shortcut = self.shortcut_input.trim().to_owned();
@@ -1295,7 +1314,7 @@ impl App {
         left: fn(&mut Self, &mut Ui),
         right: fn(&mut Self, &mut Ui),
     ) {
-        if ui.available_width() < 600.0 {
+        if ui.available_width() < STACKED_LAYOUT_WIDTH {
             for add in [left, right] {
                 card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -1352,7 +1371,7 @@ fn phase_color(phase: Phase) -> egui::Color32 {
         Phase::CloudIdle | Phase::Ready => SUCCESS,
         Phase::Error | Phase::MissingModel => DANGER,
         Phase::Recording => SUCCESS,
-        Phase::Loading | Phase::Transcribing => ACCENT,
+        Phase::Loading | Phase::Starting | Phase::Transcribing => ACCENT,
     }
 }
 
@@ -1362,6 +1381,7 @@ fn phase_label(phase: Phase, english: bool) -> &'static str {
         Phase::CloudIdle | Phase::Ready => t("Siap", "Ready"),
         Phase::Recording => t("Merekam", "Recording"),
         Phase::Loading => t("Memuat", "Loading"),
+        Phase::Starting => t("Menyiapkan mikrofon", "Starting microphone"),
         Phase::Transcribing => t("Memproses", "Processing"),
         Phase::MissingModel => t("Belum siap", "Not ready"),
         Phase::Error => t("Galat", "Error"),
@@ -1662,7 +1682,7 @@ impl eframe::App for App {
                         // Koreksi linear dari frame ini; stabil setelah satu pass tambahan.
                         // Dibulatkan ke bawah agar pembulatan piksel tidak memunculkan scrollbar.
                         let used = ui.min_rect().height();
-                        let extra = if ui.available_width() < 600.0 {
+                        let extra = if ui.available_width() < STACKED_LAYOUT_WIDTH {
                             0.0
                         } else {
                             (self.extra + available - used - 1.0).max(0.0).floor()
@@ -1789,6 +1809,10 @@ fn message(text: &str, english: bool) -> String {
         (
             "Tidak ada jendela tujuan; hasil hanya tampil di sini.",
             "No target window; results appear only here.",
+        ),
+        (
+            "Lepaskan shortcut sebelum menggantinya.",
+            "Release the shortcut before changing it.",
         ),
         ("Memasukkan teks…", "Inserting text…"),
         ("Tidak ada ucapan terdeteksi.", "No speech detected."),

@@ -18,6 +18,7 @@ pub enum Phase {
     CloudIdle,
     Loading,
     Ready,
+    Starting,
     Recording,
     Transcribing,
     Error,
@@ -25,7 +26,10 @@ pub enum Phase {
 
 impl Phase {
     pub fn busy(self) -> bool {
-        matches!(self, Self::Loading | Self::Recording | Self::Transcribing)
+        matches!(
+            self,
+            Self::Loading | Self::Starting | Self::Recording | Self::Transcribing
+        )
     }
 }
 
@@ -415,7 +419,7 @@ impl Controller {
                     self.start(source);
                 }
             }
-            Phase::Loading | Phase::Transcribing => {
+            Phase::Loading | Phase::Starting | Phase::Transcribing => {
                 self.st().note = "Sedang sibuk; shortcut diabaikan sampai selesai.".into();
             }
             _ => {
@@ -425,6 +429,7 @@ impl Controller {
     }
 
     fn start(&mut self, source: Source) {
+        self.st().phase = Phase::Starting;
         // Target diambil saat shortcut ditekan; tombol GUI tidak pernah mengetik ke luar.
         self.target = match source {
             Source::Hotkey => windows::foreground_target(),
