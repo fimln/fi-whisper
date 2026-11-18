@@ -81,11 +81,16 @@ impl App {
         {
             window.hwnd.store(h.hwnd.get(), Ordering::SeqCst);
         }
-        // shortcut: Glow eframe 0.37 menampilkan jendela sebelum swap_buffers; hapus saat upstream memperbaikinya.
-        let startup = windows::StartupWindow::new(
-            window.hwnd.load(Ordering::SeqCst),
-            cc.egui_ctx.cumulative_frame_nr(),
-        );
+        let start_in_tray = std::env::args_os().any(|arg| arg == "--tray");
+        // Saat masuk tray, sembunyikan frame pertama yang ditampilkan Glow.
+        let startup = if start_in_tray {
+            windows::StartupWindow::new(
+                window.hwnd.load(Ordering::SeqCst),
+                cc.egui_ctx.cumulative_frame_nr(),
+            )
+        } else {
+            None
+        };
 
         let ctx = cc.egui_ctx.clone();
         let core = controller::spawn(move || ctx.request_repaint());
@@ -140,7 +145,7 @@ impl App {
             icons: theme::Icons::load(&cc.egui_ctx),
             window,
             startup,
-            start_in_tray: std::env::args_os().any(|arg| arg == "--tray"),
+            start_in_tray,
             engine: config.engine,
             asr: config.asr_model.clone().or_else(|| {
                 (!config.engine.is_cloud())
@@ -1600,7 +1605,7 @@ impl eframe::App for App {
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         if self.window.open_requested.swap(false, Ordering::SeqCst) {
             let hwnd = self.window.hwnd.load(Ordering::SeqCst);
-            // Seperti startup, tunggu satu frame lengkap sebelum DWM menampilkan jendela.
+            // Tunggu satu frame lengkap sebelum DWM menampilkan kembali jendela.
             if self.startup.is_none() {
                 self.startup = windows::StartupWindow::new(hwnd, ctx.cumulative_frame_nr());
             }
