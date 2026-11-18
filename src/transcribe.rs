@@ -32,6 +32,7 @@ pub enum Job {
         session: u64,
         samples: Vec<f32>,
         language: Language,
+        vocabulary: String,
     },
     /// Mensimulasikan panic di thread worker.
     #[cfg(test)]
@@ -151,7 +152,7 @@ enum Asr {
 struct WhisperAsr {
     // `state` harus di-drop sebelum context.
     state: WhisperState,
-    _ctx: WhisperContext,
+    ctx: WhisperContext,
 }
 
 fn panic_message(payload: &(dyn std::any::Any + Send)) -> String {
@@ -215,6 +216,7 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Even
                 session,
                 samples,
                 language,
+                vocabulary,
             } => {
                 let timing = Timing {
                     audio: Duration::from_secs_f64(samples.len() as f64 / 16_000.0),
@@ -222,9 +224,15 @@ fn run(rx: mpsc::Receiver<Job>, cancelled: Arc<AtomicU64>, events: &impl Fn(Even
                 };
                 let (outcome, timing) = match models.as_mut() {
                     None => (Outcome::Failed("Model belum dimuat.".into()), timing),
-                    Some(m) => {
-                        transcribe(m, session, &samples, language, threads, &cancelled, timing)
-                    }
+                    Some(m) => transcribe(
+                        m,
+                        session,
+                        &samples,
+                        (language, &vocabulary),
+                        threads,
+                        &cancelled,
+                        timing,
+                    ),
                 };
                 events(Event::Finished {
                     session,
@@ -304,7 +312,7 @@ fn load_whisper(asr: &Path) -> Result<WhisperAsr, String> {
     let state = ctx.create_state().map_err(|e| {
         format!("State ASR gagal dibuat ({e}); memori GPU/RAM mungkin tidak cukup.")
     })?;
-    Ok(WhisperAsr { state, _ctx: ctx })
+    Ok(WhisperAsr { state, ctx })
 }
 
 fn load_qwen(dir: &Path) -> Result<(qwen3_asr::AsrInference, String), String> {
@@ -371,7 +379,7 @@ fn transcribe(
     m: &mut Models,
     session: u64,
     samples: &[f32],
-    language: Language,
+    recognition: (Language, &str),
     threads: i32,
     cancelled: &Arc<AtomicU64>,
     mut timing: Timing,
@@ -404,9 +412,12 @@ fn transcribe(
     }
 
     let started = Instant::now();
+    let (language, vocabulary) = recognition;
     let result = match &mut m.asr {
-        Asr::Whisper(w) => run_whisper(w, session, &audio, language, threads, cancelled),
-        Asr::Qwen(q) => run_qwen(q, session, &audio, language, cancelled),
+        Asr::Whisper(w) => {
+            run_whisper(w, session, &audio, language, vocabulary, threads, cancelled)
+        }
+        Asr::Qwen(q) => run_qwen(q, session, &audio, language, vocabulary, cancelled),
     };
     timing.asr = started.elapsed();
     if is_cancelled() {
@@ -424,10 +435,21 @@ fn run_whisper(
     session: u64,
     audio: &[f32],
     language: Language,
+    vocabulary: &str,
     threads: i32,
     cancelled: &Arc<AtomicU64>,
 ) -> Result<String, String> {
     let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+    let tokens;
+    if !vocabulary.is_empty() {
+        tokens = w
+            .ctx
+            .tokenize(vocabulary, vocabulary.len() + 1)
+            .map_err(|e| e.to_string())?;
+        // set_initial_prompt pada whisper-rs 0.16 membocorkan CString per panggilan.
+        // Token dipinjam selama full(); whisper.cpp membatasi panjang konteks.
+        params.set_tokens(&tokens);
+    }
     params.set_n_threads(threads);
     params.set_language(language.code());
     params.set_translate(false);
@@ -467,12 +489,14 @@ fn run_qwen(
     session: u64,
     audio: &[f32],
     language: Language,
+    vocabulary: &str,
     cancelled: &Arc<AtomicU64>,
 ) -> Result<String, String> {
     let flag = cancelled.clone();
     let mut options = qwen3_asr::TranscribeOptions::default()
         .with_max_new_tokens(QWEN_MAX_TOKENS)
         .with_abort(move || flag.load(Ordering::SeqCst) >= session);
+    options.context = vocabulary.to_owned();
     if let Some(name) = language.qwen_name() {
         options = options.with_language(name);
     }
@@ -667,6 +691,7 @@ mod tests {
             session: 1,
             samples: Vec::new(),
             language: Language::Indonesian,
+            vocabulary: String::new(),
         };
         assert!(worker.send(job).is_err());
     }
@@ -771,6 +796,7 @@ mod tests {
                 session: 1,
                 samples: silence,
                 language: Language::Indonesian,
+                vocabulary: String::new(),
             })
             .unwrap();
         let Event::Finished { outcome, .. } = rx
@@ -802,6 +828,7 @@ mod tests {
                         session: 2 + (round * fixtures.len() + i) as u64,
                         samples: fixture_samples(root, name),
                         language: Language::Indonesian,
+                        vocabulary: String::new(),
                     })
                     .unwrap();
                 let Event::Finished {
@@ -841,12 +868,32 @@ mod tests {
             processing_seconds / audio_seconds
         );
         assert!(wer <= 0.20, "fixture WER regression: {wer:.3}");
+        worker
+            .send(Job::Transcribe {
+                session: 99,
+                samples: fixture_samples(root, "id_id_0000.wav"),
+                language: Language::Indonesian,
+                vocabulary: "konvensional".into(),
+            })
+            .unwrap();
+        let Event::Finished {
+            outcome: Outcome::Text(prompted),
+            ..
+        } = rx.recv_timeout(Duration::from_secs(120)).unwrap()
+        else {
+            panic!("expected prompted transcript")
+        };
+        assert!(
+            prompted.to_lowercase().contains("konvensional"),
+            "missing vocabulary term"
+        );
         // Deteksi bahasa otomatis juga harus menghasilkan teks bersih (tanpa prefiks bahasa).
         worker
             .send(Job::Transcribe {
                 session: 100,
                 samples: fixture_samples(root, "id_id_0001.wav"),
                 language: Language::Auto,
+                vocabulary: String::new(),
             })
             .unwrap();
         let Event::Finished { outcome, .. } = rx
@@ -869,6 +916,7 @@ mod tests {
                 session: 101,
                 samples: long,
                 language: Language::Indonesian,
+                vocabulary: String::new(),
             })
             .unwrap();
         thread::sleep(Duration::from_millis(100));
@@ -893,6 +941,7 @@ mod tests {
                 session: 102,
                 samples: noise,
                 language: Language::Indonesian,
+                vocabulary: String::new(),
             })
             .unwrap();
         let Event::Finished { outcome, .. } = rx

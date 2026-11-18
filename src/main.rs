@@ -18,6 +18,8 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::Duration;
 use theme::*;
 
+const STACKED_LAYOUT_WIDTH: f32 = 600.0;
+
 /// Kondisi lintas thread untuk handler tray/hotkey.
 struct Window {
     hwnd: AtomicIsize,
@@ -49,6 +51,7 @@ struct App {
     default_mic: Option<String>,
     mic_error: String,
     shortcut_input: String,
+    vocabulary_draft: Option<String>,
     shortcut_error: String,
     hotkeys: Option<windows::Hotkeys>,
     tray: Option<windows::Tray>,
@@ -100,8 +103,8 @@ impl App {
 
         // Handler hotkey/tray berjalan di message loop thread utama, juga saat jendela tersembunyi.
         let tx = core.tx.clone();
-        let hotkeys = windows::Hotkeys::new(move || {
-            let _ = tx.send(Cmd::Toggle(Source::Hotkey));
+        let hotkeys = windows::Hotkeys::new(move |pressed| {
+            let _ = tx.send(Cmd::Hotkey(pressed));
         });
         let (tx, win, ctx) = (core.tx.clone(), window.clone(), cc.egui_ctx.clone());
         let tray = windows::create_tray(move |action| match action {
@@ -159,6 +162,7 @@ impl App {
                     .then(|| config::default_model(config::VAD_DIR, config::VAD_FILE))
                     .flatten()
             }),
+            vocabulary_draft: None,
             shortcut_input: config.shortcut.clone(),
             model_valid: [false; 4],
             config,
@@ -283,6 +287,8 @@ impl App {
         self.core.send(Cmd::Settings {
             mic: self.config.microphone.clone(),
             language: self.config.language,
+            hold_to_talk: self.config.hold_to_talk,
+            vocabulary: self.config.vocabulary.as_str().to_owned(),
         });
     }
 
@@ -458,19 +464,46 @@ impl App {
         meter(
             ui,
             recording,
-            matches!(phase, Phase::Loading | Phase::Transcribing),
+            matches!(
+                phase,
+                Phase::Loading | Phase::Starting | Phase::Transcribing
+            ),
             self.level,
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            let vocabulary_label = t("Kosakata", "Vocabulary");
+            let start = t("Mulai dikte", "Start dictation");
+            let done = t("Selesai", "Done");
+            let processing = t("Memproses…", "Processing…");
+            let loading = t("Memuat…", "Loading…");
+            let width = [start, done, processing, loading, vocabulary_label]
+                .into_iter()
+                .map(|text| {
+                    ui.painter()
+                        .layout_no_wrap(text.to_owned(), medium(14.0), TEXT)
+                        .size()
+                        .x
+                })
+                .fold(0.0, f32::max)
+                .ceil()
+                + 2.0
+                    * (ui.spacing().button_padding.x
+                        + ui.visuals().widgets.inactive.bg_stroke.width);
             let (enabled, label) = match phase {
-                Phase::Recording => (true, t("Selesai", "Done")),
-                Phase::Transcribing => (false, "Memproses…"),
-                Phase::Loading => (false, "Memuat…"),
-                _ => (ready, t("Mulai dikte", "Start dictation")),
+                Phase::Recording => (true, done),
+                Phase::Transcribing => (false, processing),
+                Phase::Loading | Phase::Starting => (false, loading),
+                _ => (ready, start),
             };
-            if primary(ui, enabled, recording, label).clicked() {
+            let fill = if recording { ACCENT_HOVER } else { ACCENT };
+            if dictation_button(ui, enabled, Some(fill), width, label).clicked() {
                 self.core.send(Cmd::Toggle(Source::Gui));
+            }
+            if !matches!(phase, Phase::Recording | Phase::Transcribing)
+                && dictation_button(ui, true, None, width, vocabulary_label).clicked()
+            {
+                self.vocabulary_draft = Some(self.config.vocabulary.as_str().to_owned());
             }
             if matches!(phase, Phase::Recording | Phase::Transcribing)
                 && secondary(ui, true, t("Batalkan", "Cancel")).clicked()
@@ -501,6 +534,42 @@ impl App {
                 .small()
                 .color(SECONDARY),
             );
+        }
+    }
+
+    fn vocabulary_dialog(&mut self, ctx: &egui::Context) {
+        let english = self.config.language == Language::English;
+        let t = |id, en| if english { en } else { id };
+        let Some(draft) = &mut self.vocabulary_draft else {
+            return;
+        };
+        let mut save = false;
+        let dialog = egui::Modal::new(egui::Id::unique("vocabulary-dialog")).show(ctx, |ui| {
+            ui.set_width(310.0);
+            title(ui, t("Kosakata", "Vocabulary"));
+            let limit = config::VOCABULARY_LIMIT;
+            ui.label(if english {
+                format!("Enter names or terms for Whisper and Qwen, one per line (max. {limit} characters).")
+            } else {
+                format!("Tulis nama atau istilah untuk Whisper dan Qwen, satu per baris (maks. {limit} karakter).")
+            });
+            egui::ScrollArea::vertical().max_height(175.0).show(ui, |ui| {
+                ui.add(egui::TextEdit::multiline(draft).desired_width(f32::INFINITY).desired_rows(5).char_limit(config::VOCABULARY_LIMIT));
+            });
+            ui.horizontal(|ui| {
+                if secondary(ui, true, t("Simpan", "Save")).clicked() {
+                    save = true;
+                    ui.close();
+                }
+                if secondary(ui, true, t("Batal", "Cancel")).clicked() { ui.close(); }
+            });
+        });
+        if save {
+            self.config.vocabulary = self.vocabulary_draft.take().unwrap_or_default().into();
+            self.save_config();
+            self.push_settings();
+        } else if dialog.should_close() {
+            self.vocabulary_draft = None;
         }
     }
 
@@ -748,6 +817,14 @@ impl App {
                     self.apply_shortcut();
                 }
             });
+        });
+        ui.add_enabled_ui(idle, |ui| {
+            changed |= ui
+                .checkbox(
+                    &mut self.config.hold_to_talk,
+                    t("Tahan shortcut untuk bicara", "Hold shortcut to talk"),
+                )
+                .changed();
         });
         if !self.mic_error.is_empty() {
             ui.label(
@@ -1191,7 +1268,7 @@ impl App {
             );
             if secondary(
                 ui,
-                true,
+                !self.core.status().phase.busy(),
                 t("Reset konfigurasi ke default", "Reset configuration"),
             )
             .clicked()
@@ -1213,7 +1290,13 @@ impl App {
         let Some(hotkeys) = self.hotkeys.as_mut() else {
             return;
         };
-        match hotkeys.set(&self.shortcut_input) {
+        let status = self.core.status();
+        if status.phase.busy() {
+            return;
+        }
+        let result = hotkeys.set(&self.shortcut_input);
+        drop(status);
+        match result {
             Ok(()) => {
                 self.shortcut_error.clear();
                 self.config.shortcut = self.shortcut_input.trim().to_owned();
@@ -1232,6 +1315,15 @@ impl App {
         left: fn(&mut Self, &mut Ui),
         right: fn(&mut Self, &mut Ui),
     ) {
+        if ui.available_width() < STACKED_LAYOUT_WIDTH {
+            for add in [left, right] {
+                card().show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    add(self, ui);
+                });
+            }
+            return;
+        }
         let previous = self.rows[index];
         // Baris atas tetap stabil saat tinggi form pada baris bawah berubah.
         let target = if index == 0 {
@@ -1280,7 +1372,7 @@ fn phase_color(phase: Phase) -> egui::Color32 {
         Phase::CloudIdle | Phase::Ready => SUCCESS,
         Phase::Error | Phase::MissingModel => DANGER,
         Phase::Recording => SUCCESS,
-        Phase::Loading | Phase::Transcribing => ACCENT,
+        Phase::Loading | Phase::Starting | Phase::Transcribing => ACCENT,
     }
 }
 
@@ -1290,6 +1382,7 @@ fn phase_label(phase: Phase, english: bool) -> &'static str {
         Phase::CloudIdle | Phase::Ready => t("Siap", "Ready"),
         Phase::Recording => t("Merekam", "Recording"),
         Phase::Loading => t("Memuat", "Loading"),
+        Phase::Starting => t("Menyiapkan mikrofon", "Starting microphone"),
         Phase::Transcribing => t("Memproses", "Processing"),
         Phase::MissingModel => t("Belum siap", "Not ready"),
         Phase::Error => t("Galat", "Error"),
@@ -1590,7 +1683,11 @@ impl eframe::App for App {
                         // Koreksi linear dari frame ini; stabil setelah satu pass tambahan.
                         // Dibulatkan ke bawah agar pembulatan piksel tidak memunculkan scrollbar.
                         let used = ui.min_rect().height();
-                        let extra = (self.extra + available - used - 1.0).max(0.0).floor();
+                        let extra = if ui.available_width() < STACKED_LAYOUT_WIDTH {
+                            0.0
+                        } else {
+                            (self.extra + available - used - 1.0).max(0.0).floor()
+                        };
                         if (extra - self.extra).abs() >= 1.0 {
                             self.extra = extra;
                             ui.ctx().request_discard("extra height");
@@ -1605,6 +1702,7 @@ impl eframe::App for App {
             egui::StrokeKind::Inside,
         );
         resize_edges(root);
+        self.vocabulary_dialog(root.ctx());
     }
 }
 
@@ -1688,7 +1786,7 @@ fn main() -> eframe::Result {
         "fi-whisper",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([700.0, 700.0])
+                .with_inner_size([700.0, 736.0])
                 .with_min_inner_size([560.0, 600.0])
                 .with_decorations(false)
                 // Tray memakai SW_HIDE; taskbar tetap aktif saat jendela dibuka kembali.
@@ -1712,6 +1810,10 @@ fn message(text: &str, english: bool) -> String {
         (
             "Tidak ada jendela tujuan; hasil hanya tampil di sini.",
             "No target window; results appear only here.",
+        ),
+        (
+            "Lepaskan shortcut sebelum menggantinya.",
+            "Release the shortcut before changing it.",
         ),
         ("Memasukkan teks…", "Inserting text…"),
         ("Tidak ada ucapan terdeteksi.", "No speech detected."),

@@ -388,49 +388,38 @@ pub fn text_field(
     )
 }
 
-/// Tombol aksi utama amber: teks off-black, hover lebih terang, glow tint saat `glow`.
-pub fn primary(ui: &mut Ui, enabled: bool, glow: bool, text: &str) -> Response {
-    let font = medium(15.0);
-    let size = vec2(140.0, 44.0);
-    let sense = if enabled {
-        Sense::click()
-    } else {
-        Sense::hover()
-    };
-    let (rect, response) = ui.allocate_exact_size(size, sense);
-    let (hover, press) = motion(ui, &response, enabled);
-    let glow = ui
-        .ctx()
-        .animate_bool_with_time(response.id.with("glow"), glow, 0.15);
-    if ui.is_rect_visible(rect) {
-        let painter = ui.painter();
-        let (fill, fg) = if !enabled {
-            (RAISED, MUTED)
-        } else {
-            (mix(ACCENT, ACCENT_HOVER, hover * (1.0 - press)), ON_ACCENT)
-        };
-        let rect = rect.shrink(press);
-        if enabled {
-            painter.rect_filled(
-                rect.expand(5.0),
-                15.0,
-                ACCENT_TINT.gamma_multiply(glow.max(hover)),
-            );
+const ACTION_HEIGHT: f32 = 34.0;
+
+/// Kedua tombol dikte memakai bingkai egui yang sama di setiap keadaan.
+pub fn dictation_button(
+    ui: &mut Ui,
+    enabled: bool,
+    fill: Option<Color32>,
+    width: f32,
+    text: &str,
+) -> Response {
+    ui.scope(|ui| {
+        let mut fg = TEXT;
+        if let Some(fill) = fill {
+            fg = if enabled { ON_ACCENT } else { MUTED };
+            if enabled {
+                let w = &mut ui.visuals_mut().widgets;
+                for (state, color) in [
+                    (&mut w.inactive, fill),
+                    (&mut w.hovered, ACCENT_HOVER),
+                    (&mut w.active, ACCENT),
+                ] {
+                    state.weak_bg_fill = color;
+                    state.bg_stroke.color = color;
+                }
+            }
         }
-        painter.rect_filled(rect, 10.0, fill);
-        if !enabled {
-            painter.rect_stroke(
-                rect,
-                10.0,
-                Stroke::new(1.0, BORDER),
-                egui::StrokeKind::Inside,
-            );
-        }
-        let galley = painter.layout_no_wrap(text.to_owned(), font, fg);
-        painter.galley(rect.center() - galley.size() / 2.0, galley, fg);
-    }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, text));
-    response
+        ui.add_enabled(
+            enabled,
+            egui::Button::new(RichText::new(text).color(fg)).min_size(vec2(width, ACTION_HEIGHT)),
+        )
+    })
+    .inner
 }
 
 /// Tombol sekunder; saat `accent` aktif, memakai latar tint amber untuk menonjolkan perubahan.
@@ -457,7 +446,8 @@ pub fn action_button(
         interactive(ui, |ui| {
             ui.add_enabled(
                 enabled,
-                egui::Button::new(RichText::new(text).color(fg)).min_size(vec2(min_width, 34.0)),
+                egui::Button::new(RichText::new(text).color(fg))
+                    .min_size(vec2(min_width, ACTION_HEIGHT)),
             )
         })
     })

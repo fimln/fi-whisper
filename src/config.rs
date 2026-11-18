@@ -128,6 +128,36 @@ impl Language {
     }
 }
 
+pub const VOCABULARY_LIMIT: usize = 512;
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "String")]
+pub struct Vocabulary(String);
+
+impl From<String> for Vocabulary {
+    fn from(input: String) -> Self {
+        let cleaned: String = input
+            .chars()
+            .filter(|&c| c != '\0')
+            .take(VOCABULARY_LIMIT)
+            .collect();
+        Self(
+            cleaned
+                .lines()
+                .map(str::trim)
+                .filter(|line| !line.is_empty())
+                .collect::<Vec<_>>()
+                .join("\n"),
+        )
+    }
+}
+
+impl Vocabulary {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Config {
@@ -144,6 +174,8 @@ pub struct Config {
     pub microphone: Option<String>,
     pub language: Language,
     pub shortcut: String,
+    pub hold_to_talk: bool,
+    pub vocabulary: Vocabulary,
     /// `true`: tombol close menyembunyikan jendela ke tray. `false`: keluar dari aplikasi.
     pub close_to_tray: bool,
     pub auto_startup: bool,
@@ -161,6 +193,8 @@ impl Default for Config {
             vad_model: None,
             microphone: None,
             language: Language::Indonesian,
+            hold_to_talk: false,
+            vocabulary: Vocabulary::default(),
             shortcut: "Ctrl+Alt+Space".into(),
             close_to_tray: true,
             auto_startup: false,
@@ -300,6 +334,26 @@ mod tests {
             assert!(validate_qwen_dir(&dir).is_err());
         }
         fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn vocabulary_is_canonical_after_loading_old_config() {
+        let config: Config = serde_json::from_value(serde_json::json!({
+            "vocabulary": " UGM\r\n\ncu\0DNN  "
+        }))
+        .unwrap();
+        assert_eq!(config.vocabulary.as_str(), "UGM\ncuDNN");
+        assert_eq!(
+            serde_json::to_value(&config).unwrap()["vocabulary"],
+            "UGM\ncuDNN"
+        );
+        assert_eq!(
+            Vocabulary::from("é".repeat(VOCABULARY_LIMIT + 1))
+                .as_str()
+                .chars()
+                .count(),
+            VOCABULARY_LIMIT
+        );
     }
 
     #[test]

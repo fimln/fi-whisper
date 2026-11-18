@@ -448,20 +448,24 @@ unsafe fn set_data(format: u32, data: &[u16]) -> Result<(), String> {
 
 // --- Hotkey global ---
 
-type HotkeyCallback = dyn Fn() + Send + Sync;
+type HotkeyCallback = dyn Fn(bool) + Send + Sync;
 // Setter dependency memakai OnceCell; handler tetap hanya meneruskan ke pemilik yang masih hidup.
-static HOTKEY_CALLBACK: Mutex<Option<Weak<HotkeyCallback>>> = Mutex::new(None);
+struct HotkeyBinding {
+    id: u32,
+    pressed: bool,
+    callback: Weak<HotkeyCallback>,
+}
+
+static HOTKEY_CALLBACK: Mutex<Option<HotkeyBinding>> = Mutex::new(None);
 
 fn hotkey_event(e: GlobalHotKeyEvent) {
-    let callback = HOTKEY_CALLBACK
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(Weak::upgrade);
-    if e.state() == HotKeyState::Pressed
-        && let Some(callback) = callback
+    let mut binding = HOTKEY_CALLBACK.lock().unwrap();
+    if let Some(active) = binding.as_mut()
+        && active.id == e.id
+        && let Some(callback) = active.callback.upgrade()
     {
-        callback();
+        active.pressed = e.state() == HotKeyState::Pressed;
+        callback(active.pressed);
     }
 }
 
@@ -469,20 +473,19 @@ fn hotkey_event(e: GlobalHotKeyEvent) {
 pub struct Hotkeys {
     manager: GlobalHotKeyManager,
     pub active: Option<(HotKey, String)>,
-    _callback: Arc<HotkeyCallback>,
+    callback: Arc<HotkeyCallback>,
 }
 
 impl Hotkeys {
-    pub fn new(on_press: impl Fn() + Send + Sync + 'static) -> Result<Self, String> {
+    pub fn new(on_event: impl Fn(bool) + Send + Sync + 'static) -> Result<Self, String> {
         let manager = GlobalHotKeyManager::new()
             .map_err(|e| format!("Shortcut global tidak tersedia: {e}"))?;
-        let callback: Arc<HotkeyCallback> = Arc::new(on_press);
-        *HOTKEY_CALLBACK.lock().unwrap() = Some(Arc::downgrade(&callback));
+        let callback: Arc<HotkeyCallback> = Arc::new(on_event);
         GlobalHotKeyEvent::set_event_handler(Some(hotkey_event));
         Ok(Self {
             manager,
             active: None,
-            _callback: callback,
+            callback,
         })
     }
 
@@ -495,6 +498,10 @@ impl Hotkeys {
         if self.active.as_ref().is_some_and(|(h, _)| *h == hotkey) {
             return Ok(());
         }
+        let mut binding = HOTKEY_CALLBACK.lock().unwrap();
+        if self.active.is_some() && binding.as_ref().is_some_and(|active| active.pressed) {
+            return Err("Lepaskan shortcut sebelum menggantinya.".into());
+        }
         self.manager.register(hotkey).map_err(|_| {
             format!(
                 "Shortcut {} sudah dipakai aplikasi lain atau ditolak Windows.",
@@ -504,6 +511,11 @@ impl Hotkeys {
         if let Some((old, _)) = self.active.take() {
             let _ = self.manager.unregister(old);
         }
+        *binding = Some(HotkeyBinding {
+            id: hotkey.id(),
+            pressed: false,
+            callback: Arc::downgrade(&self.callback),
+        });
         self.active = Some((hotkey, text.trim().to_owned()));
         Ok(())
     }
@@ -704,15 +716,31 @@ mod tests {
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         for expected in 1..=2 {
             let target = calls.clone();
-            let hotkeys = Hotkeys::new(move || {
+            let mut hotkeys = Hotkeys::new(move |_| {
                 target.fetch_add(1, Ordering::SeqCst);
             })
             .unwrap();
+            hotkeys.set("Ctrl+Alt+F23").unwrap();
+            let old = hotkeys.active.as_ref().unwrap().0.id();
             hotkey_event(GlobalHotKeyEvent {
-                id: 0,
+                id: old,
                 state: HotKeyState::Pressed,
             });
-            assert_eq!(calls.load(Ordering::SeqCst), expected);
+            assert!(hotkeys.set("Ctrl+Alt+F24").is_err());
+            hotkey_event(GlobalHotKeyEvent {
+                id: old,
+                state: HotKeyState::Released,
+            });
+            hotkeys.set("Ctrl+Alt+F24").unwrap();
+            hotkey_event(GlobalHotKeyEvent {
+                id: old,
+                state: HotKeyState::Released,
+            });
+            hotkey_event(GlobalHotKeyEvent {
+                id: hotkeys.active.as_ref().unwrap().0.id(),
+                state: HotKeyState::Released,
+            });
+            assert_eq!(calls.load(Ordering::SeqCst), 3 * expected);
             drop(hotkeys);
             assert_eq!(Arc::strong_count(&calls), 1);
         }
@@ -731,12 +759,12 @@ mod tests {
         menu_event(MenuEvent {
             id: MenuId::new("open"),
         });
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
         drop(callback);
         menu_event(MenuEvent {
             id: MenuId::new("open"),
         });
-        assert_eq!(calls.load(Ordering::SeqCst), 3);
+        assert_eq!(calls.load(Ordering::SeqCst), 7);
         assert_eq!(Arc::strong_count(&calls), 1);
     }
 
