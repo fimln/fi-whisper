@@ -1,11 +1,11 @@
 # fi-whisper
 
-Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR dan Google Cloud Chirp 3. Shortcut global merekam suara; mesin lokal memakai VAD Silero dan GPU, sedangkan cloud mengirim PCM langsung ke STT V2. Hasil final diketik ke jendela tujuan lewat SendInput. Repo publik: `fimln/fi-whisper`, lisensi MIT.
+Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR serta layanan cloud Google Chirp 3 dan DeepSeek ASR. Shortcut global merekam suara; mesin lokal memakai VAD Silero dan GPU. Chirp 3 mengalirkan PCM saat merekam, sedangkan DeepSeek mengunggah WAV setelah rekaman selesai. Hasil final diketik ke jendela tujuan lewat SendInput. Repo publik: `fimln/fi-whisper`, lisensi MIT.
 
 ## Prinsip
-- Mesin lokal tidak membuka koneksi jaringan. Google Cloud Chirp 3 memakai ADC dan STT V2 hanya setelah cloud dipilih dan dikte dimulai. Tidak ada centang izin tambahan, telemetry, preflight startup, atau fallback otomatis. Token, audio, dan hasil cloud hanya di RAM.
+- Mesin lokal tidak membuka koneksi jaringan. Koneksi ke penyedia cloud hanya dibuka untuk sesi dikte dengan mesin tersebut. Tidak ada centang izin tambahan, telemetry, preflight startup, atau fallback otomatis. Token, audio, dan hasil cloud hanya di RAM.
 - Jangan simpan audio, transkrip, judul jendela, atau isi clipboard ke disk atau log. Hasil terakhir hanya di RAM.
-- Tokio, tonic, dan reqwest diizinkan hanya untuk worker Google Cloud. Komponen lokal tetap memakai thread/channel standar. Jangan tambah framework, ONNX, Python, downloader model, overlay, atau dependensi lain tanpa diminta.
+- Tokio, tonic, dan reqwest diizinkan hanya untuk worker cloud. Komponen lokal tetap memakai thread/channel standar. Jangan tambah framework, ONNX, Python, downloader model, overlay, atau dependensi lain tanpa diminta.
 - Jangan pernah mengetik ke jendela yang berubah, ke fi-whisper sendiri, atau mengirim Enter otomatis. Kalau ragu, simpan hasil untuk Salin manual.
 - CPU fallback harus terlihat di UI, tidak boleh mengaku GPU.
 
@@ -13,29 +13,30 @@ Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR d
 - `src/main.rs`: UI (header, kartu Dikte, Hasil terakhir, Pengaturan, Model).
 - `src/controller.rs`: state rekaman di thread sendiri (hotkey tetap jalan saat jendela tersembunyi), sesi, penyisipan teks.
 - `src/transcribe.rs`: worker model (VAD, Whisper, Qwen3-ASR), abort per sesi, uji fixture `#[ignore]`.
-- `src/cloud.rs`: ADC `authorized_user`, streaming gRPC Chirp 3 (`id-ID`, region `us`/`eu`), cancellation, batas penggunaan bulanan UTC.
+- `src/cloud.rs`: ADC `authorized_user`, unggahan WAV DeepSeek, streaming gRPC Chirp 3 (region `us`/`eu`), cancellation, batas penggunaan bulanan UTC.
 - `src/audio.rs`: CPAL + rtrb + rubato ke 16 kHz mono, batas 120 detik; cloud memakai resampling inkremental dan buffer terbatas tanpa membuang audio diam-diam.
 - `src/windows.rs`: single instance, hotkey, tray, foreground, SendInput Unicode, clipboard tanpa History.
-- `src/config.rs`: `Engine`, `Language`, `GoogleConfig` (project, region, batas menit), config JSON atomik di `%LOCALAPPDATA%\fi-whisper\config.json`. Field lama `google.enabled` diabaikan.
+- `src/config.rs`: `Engine`, `Language`, `GoogleConfig`, `DeepSeekConfig`, config JSON atomik di `%LOCALAPPDATA%\fi-whisper\config.json`. Field lama `google.enabled` diabaikan.
 - `src/theme.rs`: palet, font, logo, ikon, helper tampilan.
 - `vendor/qwen3-asr`: salinan crate qwen3-asr 0.2.2 dengan patch (layout `*-hf`, pembatalan). Ubah seperlunya, catat di `docs/CREDITS.md`.
 - `assets/`: logo (dibuat `scripts/make-logo.py`), ikon Octicons, screenshot README.
 
 ## Model
 - Disimpan di `models\<folder>\`, tidak di-commit. Whisper `whisper-large-v3-turbo\ggml-large-v3-turbo.bin`, VAD `silero-vad-v6.2.0\ggml-silero-v6.2.0.bin`, Qwen `Qwen3-ASR-0.6B-hf\` dan `Qwen3-ASR-1.7B-hf\`.
-- Sumber, revision, dan SHA-256 ada di README. Model baru wajib dipin revision dan diverifikasi hash.
+- README menautkan revisi model. Catatan verifikasi hash ada di `docs/MODEL-TEST.md`. Model baru wajib dipin revision dan diverifikasi hash.
 - Serde `"qwen3-asr"` berarti 0.6B demi kompatibilitas config lama. Jangan diubah.
-- Serde `"google-chirp-3"` memilih cloud, tanpa model ASR/VAD lokal. Jangan memuat model lokal saat startup cloud.
+- Serde `"google-chirp-3"` dan `"deepseek-asr"` memilih mesin cloud, tanpa model ASR/VAD lokal. Jangan memuat model lokal saat startup cloud.
 
 ## Cloud
-- ADC dibaca dari `GOOGLE_APPLICATION_CREDENTIALS` atau lokasi standar gcloud Windows; hanya `authorized_user`. Jangan log token atau detail respons server yang bisa memuat data request.
-- `cloud-usage.json` di direktori konfigurasi hanya menyimpan durasi per project/bulan UTC. Default batas 600 menit; cadangkan 120 detik sebelum sesi lalu sesuaikan menurut byte yang diserahkan ke transport, dibulatkan ke detik. Reservasi tetap dihitung jika proses crash. Ini penghitung lokal, bukan tagihan Google.
-- Pengiriman mengikuti jadwal durasi audio yang tetap agar keterlambatan timer tidak terakumulasi. Buffer penuh, koneksi gagal, atau pembatalan harus menghentikan sesi tanpa menyisipkan hasil parsial/gagal. Hasil final tetap melalui pemeriksaan sesi dan jendela tujuan yang sama dengan mesin lokal.
+- DeepSeek membaca `DEEPSEEK_API_KEY` atau `deepseek.api_key` dari konfigurasi. Jangan mencatat kunci API.
+- ADC Google dibaca dari `GOOGLE_APPLICATION_CREDENTIALS` atau lokasi standar gcloud Windows; hanya `authorized_user`. Jangan log token atau detail respons server yang bisa memuat data request.
+- `cloud-usage.json` di direktori konfigurasi hanya menyimpan durasi per bulan UTC untuk setiap project Google dan untuk DeepSeek (`deepseek:api`). Default batas 600 menit; cadangkan 120 detik sebelum sesi lalu sesuaikan menurut durasi PCM yang diserahkan ke transport Google atau disiapkan untuk unggahan DeepSeek, dibulatkan ke detik. Reservasi tetap dihitung jika proses crash. Ini penghitung lokal, bukan tagihan Google.
+- Streaming Google mengikuti jadwal durasi audio yang tetap agar keterlambatan timer tidak terakumulasi. Buffer penuh, koneksi gagal, atau pembatalan harus menghentikan sesi tanpa menyisipkan hasil parsial/gagal. Hasil final tetap melalui pemeriksaan sesi dan jendela tujuan yang sama dengan mesin lokal.
 
 ## UI
 - Palet amber di `theme.rs`. Teks di atas amber selalu `ON_ACCENT` (gelap), tidak pernah putih.
-- Tanpa dot status, hint mesin, atau tagline. Teks UI singkat, bahasa Indonesia.
-- Header cloud saat idle: badge `Chirp 3`, lalu status `Siap` dengan warna siap biasa. Kartu Model langsung menampilkan pengaturan project, tanpa logo Google Cloud atau teks pemeriksaan ADC; bantuan tetap di `Setup ADC`.
+- Tanpa dot status, hint mesin, atau tagline. Sediakan teks singkat dalam bahasa Indonesia dan Inggris sesuai pengaturan bahasa.
+- Header Chirp 3 saat idle: badge `Chirp 3`, lalu status `Siap` dengan warna siap biasa. Kartu Model langsung menampilkan pengaturan project, tanpa logo Google Cloud atau teks pemeriksaan ADC; bantuan tetap di `Setup ADC`.
 - Hindari elemen yang muncul atau hilang di baris tombol (mis. spinner), karena menggeser layout.
 - Di layout `right_to_left`, tambahkan anak dengan urutan terbalik. `Id::new` dan `WidgetType` deprecated di egui 0.37.
 - Cek visual lewat MCP egui: build `--features inspection`, jalankan dengan `EGUI_INSPECTION=1`. Fitur ini tidak boleh masuk build rilis.
@@ -67,5 +68,5 @@ Peringatan `vswhere.exe` dan LNK4098 (LIBCMT) sudah ada sejak awal dan tidak per
 
 ## Workflow
 - Commit dan push hanya jika diminta. Pesan commit singkat, bahasa Inggris.
-- Gaya kode singkat, komentar hanya untuk alasan yang tidak jelas dari kode.
+- Tulis komentar dalam bahasa Indonesia untuk menjelaskan alasan yang sulit disimpulkan dari kode.
 - Balas dalam bahasa Indonesia, langsung ke inti, tanpa trope AI.
