@@ -9,7 +9,7 @@
   <img src="https://img.shields.io/badge/status-early%20alpha-D4A72C?style=flat-square&labelColor=555555" alt="Status early alpha">
 </p>
 
-<p align="center">Windows dictation in Rust. Run offline or use Google Chirp 3 or DeepSeek ASR. Zero telemetry.</p>
+<p align="center">Automatic Speech Recognition (ASR) software for Windows. Run locally without internet, or use Google Chirp and DeepSeek ASR. Built with Rust. Because your rambling is your business, i give you zero telemetry.</p>
 
 <p align="center"><img src="assets/screenshot.png" width="620" alt="fi-whisper window: Dictation, Last result, Settings, and Model"></p>
 
