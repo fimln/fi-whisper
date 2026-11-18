@@ -496,11 +496,12 @@ impl App {
                 Phase::Loading | Phase::Starting => (false, loading),
                 _ => (ready, start),
             };
-            if primary(ui, enabled, recording, width, label).clicked() {
+            let fill = if recording { ACCENT_HOVER } else { ACCENT };
+            if dictation_button(ui, enabled, Some(fill), width, label).clicked() {
                 self.core.send(Cmd::Toggle(Source::Gui));
             }
             if !matches!(phase, Phase::Recording | Phase::Transcribing)
-                && action_button(ui, true, false, width, vocabulary_label).clicked()
+                && dictation_button(ui, true, None, width, vocabulary_label).clicked()
             {
                 self.vocabulary_draft = Some(self.config.vocabulary.as_str().to_owned());
             }
