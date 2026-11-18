@@ -487,13 +487,23 @@ fn push_frames<T>(
     f32: FromSample<T>,
 {
     let mut peak = 0.0f32;
-    for frame in data.chunks_exact(channels) {
+    let frames = data.chunks_exact(channels);
+    let count = frames.len();
+    let mono_frames = frames.map(|frame| {
         let sum: f32 = frame.iter().map(|s| f32::from_sample(*s)).sum();
         let mono = sum / channels as f32;
         peak = peak.max(mono.abs());
-        if producer.push(mono).is_err() {
-            overflow.store(true, Ordering::Relaxed);
-            return;
+        mono
+    });
+    if let Ok(chunk) = producer.write_chunk_uninit(count) {
+        chunk.fill_from_iter(mono_frames);
+    } else {
+        // Keep accepting frames while the consumer frees space near capacity.
+        for mono in mono_frames {
+            if producer.push(mono).is_err() {
+                overflow.store(true, Ordering::Relaxed);
+                return;
+            }
         }
     }
     // Bit f32 positif terurut sama dengan nilainya, jadi fetch_max aman untuk peak.
