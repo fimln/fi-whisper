@@ -450,15 +450,14 @@ unsafe fn set_data(format: u32, data: &[u16]) -> Result<(), String> {
 
 type HotkeyCallback = dyn Fn(bool) + Send + Sync;
 // Setter dependency memakai OnceCell; handler tetap hanya meneruskan ke pemilik yang masih hidup.
-static HOTKEY_CALLBACK: Mutex<Option<Weak<HotkeyCallback>>> = Mutex::new(None);
+static HOTKEY_CALLBACK: Mutex<Option<(u32, Weak<HotkeyCallback>)>> = Mutex::new(None);
 
 fn hotkey_event(e: GlobalHotKeyEvent) {
-    let callback = HOTKEY_CALLBACK
-        .lock()
-        .unwrap()
-        .as_ref()
-        .and_then(Weak::upgrade);
-    if let Some(callback) = callback {
+    let binding = HOTKEY_CALLBACK.lock().unwrap();
+    if let Some((id, callback)) = binding.as_ref()
+        && *id == e.id
+        && let Some(callback) = callback.upgrade()
+    {
         callback(e.state() == HotKeyState::Pressed);
     }
 }
@@ -467,7 +466,7 @@ fn hotkey_event(e: GlobalHotKeyEvent) {
 pub struct Hotkeys {
     manager: GlobalHotKeyManager,
     pub active: Option<(HotKey, String)>,
-    _callback: Arc<HotkeyCallback>,
+    callback: Arc<HotkeyCallback>,
 }
 
 impl Hotkeys {
@@ -475,12 +474,11 @@ impl Hotkeys {
         let manager = GlobalHotKeyManager::new()
             .map_err(|e| format!("Shortcut global tidak tersedia: {e}"))?;
         let callback: Arc<HotkeyCallback> = Arc::new(on_event);
-        *HOTKEY_CALLBACK.lock().unwrap() = Some(Arc::downgrade(&callback));
         GlobalHotKeyEvent::set_event_handler(Some(hotkey_event));
         Ok(Self {
             manager,
             active: None,
-            _callback: callback,
+            callback,
         })
     }
 
@@ -493,6 +491,7 @@ impl Hotkeys {
         if self.active.as_ref().is_some_and(|(h, _)| *h == hotkey) {
             return Ok(());
         }
+        let mut binding = HOTKEY_CALLBACK.lock().unwrap();
         self.manager.register(hotkey).map_err(|_| {
             format!(
                 "Shortcut {} sudah dipakai aplikasi lain atau ditolak Windows.",
@@ -502,6 +501,7 @@ impl Hotkeys {
         if let Some((old, _)) = self.active.take() {
             let _ = self.manager.unregister(old);
         }
+        *binding = Some((hotkey.id(), Arc::downgrade(&self.callback)));
         self.active = Some((hotkey, text.trim().to_owned()));
         Ok(())
     }
@@ -702,13 +702,20 @@ mod tests {
         let calls = Arc::new(std::sync::atomic::AtomicU32::new(0));
         for expected in 1..=2 {
             let target = calls.clone();
-            let hotkeys = Hotkeys::new(move |_| {
+            let mut hotkeys = Hotkeys::new(move |_| {
                 target.fetch_add(1, Ordering::SeqCst);
             })
             .unwrap();
+            hotkeys.set("Ctrl+Alt+F23").unwrap();
+            let old = hotkeys.active.as_ref().unwrap().0.id();
+            hotkeys.set("Ctrl+Alt+F24").unwrap();
             hotkey_event(GlobalHotKeyEvent {
-                id: 0,
-                state: HotKeyState::Pressed,
+                id: old,
+                state: HotKeyState::Released,
+            });
+            hotkey_event(GlobalHotKeyEvent {
+                id: hotkeys.active.as_ref().unwrap().0.id(),
+                state: HotKeyState::Released,
             });
             assert_eq!(calls.load(Ordering::SeqCst), expected);
             drop(hotkeys);

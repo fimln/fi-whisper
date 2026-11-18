@@ -373,16 +373,7 @@ impl Controller {
             } => {
                 self.mic = mic;
                 self.hold_to_talk = hold_to_talk;
-                self.vocabulary = vocabulary
-                    .chars()
-                    .take(512)
-                    .filter(|c| *c != '\0')
-                    .collect::<String>()
-                    .lines()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join(", ");
+                self.vocabulary = vocabulary;
                 self.language = language;
             }
             Cmd::ClearResult => {
@@ -778,6 +769,22 @@ mod tests {
             outcome: Outcome::Text("test".into()),
             timing: Timing::default(),
         }
+    }
+
+    #[test]
+    #[ignore = "memakai mikrofon default untuk memeriksa tekan dan lepas"]
+    fn microphone_hold_press_and_release() {
+        let (tx, _rx) = mpsc::channel();
+        let mut c = Controller::new(tx);
+        c.st().loaded = Some((Engine::Whisper, PathBuf::new(), PathBuf::new()));
+        c.st().phase = Phase::Ready;
+        c.hold_to_talk = true;
+        c.handle(Cmd::Hotkey(true));
+        assert_eq!(c.st().phase, Phase::Recording);
+        assert_eq!(c.held_session, Some(c.session));
+        c.handle(Cmd::Hotkey(false));
+        assert_eq!(c.st().phase, Phase::Transcribing);
+        assert!(c.held_session.is_none());
     }
 
     #[test]

@@ -286,7 +286,7 @@ impl App {
             mic: self.config.microphone.clone(),
             language: self.config.language,
             hold_to_talk: self.config.hold_to_talk,
-            vocabulary: self.config.vocabulary.clone(),
+            vocabulary: self.config.vocabulary.as_str().to_owned(),
         });
     }
 
@@ -467,19 +467,29 @@ impl App {
         );
         ui.add_space(6.0);
         ui.horizontal(|ui| {
+            let vocabulary_label = t("Kosakata", "Vocabulary");
+            let width = ui
+                .painter()
+                .layout_no_wrap(vocabulary_label.to_owned(), medium(14.0), TEXT)
+                .size()
+                .x
+                .ceil()
+                + 2.0
+                    * (ui.spacing().button_padding.x
+                        + ui.visuals().widgets.inactive.bg_stroke.width);
             let (enabled, label) = match phase {
                 Phase::Recording => (true, t("Selesai", "Done")),
-                Phase::Transcribing => (false, "Memproses…"),
-                Phase::Loading => (false, "Memuat…"),
+                Phase::Transcribing => (false, t("Memproses…", "Processing…")),
+                Phase::Loading => (false, t("Memuat…", "Loading…")),
                 _ => (ready, t("Mulai dikte", "Start dictation")),
             };
-            if primary(ui, enabled, recording, label).clicked() {
+            if primary(ui, enabled, recording, width, label).clicked() {
                 self.core.send(Cmd::Toggle(Source::Gui));
             }
             if !matches!(phase, Phase::Recording | Phase::Transcribing)
-                && secondary(ui, true, t("Kosakata", "Vocabulary")).clicked()
+                && action_button(ui, true, false, width, vocabulary_label).clicked()
             {
-                self.vocabulary_draft = Some(self.config.vocabulary.clone());
+                self.vocabulary_draft = Some(self.config.vocabulary.as_str().to_owned());
             }
             if matches!(phase, Phase::Recording | Phase::Transcribing)
                 && secondary(ui, true, t("Batalkan", "Cancel")).clicked()
@@ -523,10 +533,14 @@ impl App {
         let dialog = egui::Modal::new(egui::Id::unique("vocabulary-dialog")).show(ctx, |ui| {
             ui.set_width(310.0);
             title(ui, t("Kosakata", "Vocabulary"));
-            ui.label(t("Tulis nama atau istilah untuk Whisper dan Qwen, satu per baris (maks. 512 karakter).",
-                       "Enter names or terms for Whisper and Qwen, one per line (max. 512 characters)."));
+            let limit = config::VOCABULARY_LIMIT;
+            ui.label(if english {
+                format!("Enter names or terms for Whisper and Qwen, one per line (max. {limit} characters).")
+            } else {
+                format!("Tulis nama atau istilah untuk Whisper dan Qwen, satu per baris (maks. {limit} karakter).")
+            });
             egui::ScrollArea::vertical().max_height(175.0).show(ui, |ui| {
-                ui.add(egui::TextEdit::multiline(draft).desired_width(f32::INFINITY).desired_rows(5).char_limit(512));
+                ui.add(egui::TextEdit::multiline(draft).desired_width(f32::INFINITY).desired_rows(5).char_limit(config::VOCABULARY_LIMIT));
             });
             ui.horizontal(|ui| {
                 if secondary(ui, true, t("Simpan", "Save")).clicked() {
@@ -537,7 +551,7 @@ impl App {
             });
         });
         if save {
-            self.config.vocabulary = self.vocabulary_draft.take().unwrap_or_default();
+            self.config.vocabulary = self.vocabulary_draft.take().unwrap_or_default().into();
             self.save_config();
             self.push_settings();
         } else if dialog.should_close() {

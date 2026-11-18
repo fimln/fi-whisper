@@ -446,7 +446,9 @@ fn run_whisper(
             .ctx
             .tokenize(vocabulary, vocabulary.len() + 1)
             .map_err(|e| e.to_string())?;
-        params.set_tokens(&tokens[..tokens.len().min(224)]);
+        // set_initial_prompt pada whisper-rs 0.16 membocorkan CString per panggilan.
+        // Token dipinjam selama full(); whisper.cpp membatasi panjang konteks.
+        params.set_tokens(&tokens);
     }
     params.set_n_threads(threads);
     params.set_language(language.code());
@@ -866,13 +868,32 @@ mod tests {
             processing_seconds / audio_seconds
         );
         assert!(wer <= 0.20, "fixture WER regression: {wer:.3}");
+        worker
+            .send(Job::Transcribe {
+                session: 99,
+                samples: fixture_samples(root, "id_id_0000.wav"),
+                language: Language::Indonesian,
+                vocabulary: "konvensional".into(),
+            })
+            .unwrap();
+        let Event::Finished {
+            outcome: Outcome::Text(prompted),
+            ..
+        } = rx.recv_timeout(Duration::from_secs(120)).unwrap()
+        else {
+            panic!("expected prompted transcript")
+        };
+        assert!(
+            prompted.to_lowercase().contains("konvensional"),
+            "missing vocabulary term"
+        );
         // Deteksi bahasa otomatis juga harus menghasilkan teks bersih (tanpa prefiks bahasa).
         worker
             .send(Job::Transcribe {
                 session: 100,
                 samples: fixture_samples(root, "id_id_0001.wav"),
                 language: Language::Auto,
-                vocabulary: "Indonesia, Jakarta".into(),
+                vocabulary: String::new(),
             })
             .unwrap();
         let Event::Finished { outcome, .. } = rx

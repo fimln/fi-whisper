@@ -388,10 +388,12 @@ pub fn text_field(
     )
 }
 
+const ACTION_HEIGHT: f32 = 34.0;
+
 /// Tombol aksi utama amber: teks off-black, hover lebih terang, glow tint saat `glow`.
-pub fn primary(ui: &mut Ui, enabled: bool, glow: bool, text: &str) -> Response {
-    let font = medium(15.0);
-    let size = vec2(140.0, 44.0);
+pub fn primary(ui: &mut Ui, enabled: bool, glow: bool, width: f32, text: &str) -> Response {
+    let font = medium(14.0);
+    let size = vec2(width, ACTION_HEIGHT);
     let sense = if enabled {
         Sense::click()
     } else {
@@ -457,7 +459,8 @@ pub fn action_button(
         interactive(ui, |ui| {
             ui.add_enabled(
                 enabled,
-                egui::Button::new(RichText::new(text).color(fg)).min_size(vec2(min_width, 34.0)),
+                egui::Button::new(RichText::new(text).color(fg))
+                    .min_size(vec2(min_width, ACTION_HEIGHT)),
             )
         })
     })
