@@ -66,7 +66,7 @@ impl Session {
         F: FnOnce(mpsc::Receiver<Vec<u8>>, Arc<AtomicU64>) -> Fut + Send + 'static,
         Fut: Future<Output = Result<String, String>>,
     {
-        let (audio, rx) = mpsc::channel(AUDIO_BUFFER_CHUNKS); // 20 detik: startup token + koneksi sampai 16 detik.
+        let (audio, rx) = mpsc::channel(AUDIO_BUFFER_CHUNKS); // Tampung hingga 20 detik audio saat transport belum siap.
         let (cancel, mut cancelled) = watch::channel(false);
         let sent = Arc::new(AtomicU64::new(0));
         let thread = std::thread::Builder::new().name("fi-whisper-cloud".into()).spawn(move || {
@@ -214,7 +214,6 @@ async fn recognize(
     sent: Arc<AtomicU64>,
 ) -> Result<String, String> {
     use api::streaming_recognize_request::StreamingRequest;
-    let access = token().await?;
     let endpoint = tonic::transport::Endpoint::from_shared(format!(
         "https://{}-speech.googleapis.com",
         c.region
@@ -223,10 +222,13 @@ async fn recognize(
     .tls_config(tonic::transport::ClientTlsConfig::new().with_native_roots())
     .map_err(|_| "TLS cloud gagal dibuat.")?
     .connect_timeout(Duration::from_secs(8));
-    let channel = endpoint
-        .connect()
-        .await
-        .map_err(|_| "Google Cloud tidak terhubung. Periksa internet.")?;
+    // Token baru diperlukan saat RPC dimulai, jadi koneksi TLS bisa dibuka bersamaan.
+    let (access, channel) = tokio::try_join!(token(), async {
+        endpoint
+            .connect()
+            .await
+            .map_err(|_| "Google Cloud tidak terhubung. Periksa internet.".to_owned())
+    })?;
     let mut client = api::speech_client::SpeechClient::new(channel);
     let (tx, rx) = mpsc::channel(2);
     tx.send(api::StreamingRecognizeRequest {
@@ -583,7 +585,7 @@ mod tests {
 
     #[test]
     fn startup_buffer_preserves_audio_during_auth_and_connect() {
-        // Modelkan 8 detik autentikasi + 8 detik koneksi tanpa konsumsi audio.
+        // Simulasikan 16 detik audio masuk sebelum transport mulai membacanya.
         let (tx, mut rx) = mpsc::channel(AUDIO_BUFFER_CHUNKS);
         for n in 0..160u16 {
             tx.try_send(vec![(n % 256) as u8; 3200])
