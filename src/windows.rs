@@ -116,6 +116,19 @@ impl Drop for Activation {
     }
 }
 
+/// Area kerja monitor jendela utama dalam piksel desktop, termasuk offset monitor sekunder.
+pub fn monitor_work_area(hwnd: isize) -> Option<windows_sys::Win32::Foundation::RECT> {
+    use windows_sys::Win32::Graphics::Gdi::{
+        GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromWindow,
+    };
+    let monitor = unsafe { MonitorFromWindow(hwnd as HWND, MONITOR_DEFAULTTONEAREST) };
+    let mut info = MONITORINFO {
+        cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+        ..Default::default()
+    };
+    (unsafe { GetMonitorInfoW(monitor, &mut info) } != 0).then_some(info.rcWork)
+}
+
 // --- Target foreground ---
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

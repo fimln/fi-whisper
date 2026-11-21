@@ -11,7 +11,7 @@
 
 <p align="center">Automatic Speech Recognition (ASR) software for Windows. Run locally without internet, or use Google Chirp and DeepSeek ASR. Built with Rust. Because your rambling is your business, i give you zero telemetry.</p>
 
-<p align="center"><img src="assets/screenshot.png" width="620" alt="fi-whisper window: Dictation, Last result, Settings, and Model"></p>
+<p align="center"><img src="assets/screenshot.png" width="620" alt="fi-whisper main window with Chirp 3 ready, a dictation timer, and an empty result panel"></p>
 
 ## License
 
@@ -49,7 +49,7 @@ flowchart LR
 ```
 ## Usage
 
-Press the shortcut, talk, then press it again to stop. Enable **Hold shortcut to talk** in Settings to record while holding the shortcut and finish on release. **Vocabulary** next to **Start dictation** accepts names and terms, one per line, for local Whisper and Qwen recognition. Your words land in the target app. Recording stops automatically after two minutes, audio and results stay in RAM. The GUI button keeps results inside fi-whisper for manual copying.
+Press the shortcut, talk, then press it again to stop. Enable **Hold shortcut to talk** in Settings to record while holding the shortcut and finish on release. **Vocabulary** in the **Model** section of Settings accepts names and terms, one per line, for local Whisper and Qwen recognition. Your words land in the target app. Recording stops automatically after two minutes, audio and results stay in RAM. The GUI button keeps results inside fi-whisper for manual copying.
 
 Settings (engine, models, microphone, language, shortcut) live in `%LOCALAPPDATA%\fi-whisper\config.json`. Choose whether closing the window hides it to the tray or quits. Select **English (US)** under Language to switch the interface to English and use English recognition.
 

@@ -74,10 +74,25 @@ pub fn interactive(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Respon
     response
 }
 
-pub fn combo(ui: &mut Ui, combo: egui::ComboBox, add: impl FnOnce(&mut Ui)) -> Response {
+pub fn combo(
+    ui: &mut Ui,
+    combo: egui::ComboBox,
+    chevron: &egui::TextureHandle,
+    add: impl FnOnce(&mut Ui),
+) -> Response {
     let style = ui.style().clone();
     interactive(ui, |ui| {
+        let chevron = chevron.id();
         combo
+            .icon(move |ui, rect, _, _| {
+                egui::Image::new((chevron, vec2(13.0, 13.0)))
+                    .tint(SECONDARY)
+                    .paint_at(
+                        ui,
+                        egui::Rect::from_center_size(rect.center(), vec2(13.0, 13.0)),
+                    );
+            })
+            .truncate()
             .show_ui(ui, |ui| {
                 ui.set_style(style);
                 add(ui);
@@ -87,12 +102,12 @@ pub fn combo(ui: &mut Ui, combo: egui::ComboBox, add: impl FnOnce(&mut Ui)) -> R
 }
 
 // Fondasi
-pub const BG: Color32 = Color32::from_rgb(0x09, 0x08, 0x07);
-pub const SURFACE: Color32 = Color32::from_rgb(0x12, 0x10, 0x0E);
-pub const RAISED: Color32 = Color32::from_rgb(0x1C, 0x19, 0x16);
-pub const BORDER: Color32 = Color32::from_rgb(0x28, 0x24, 0x1F);
+pub const BG: Color32 = Color32::from_gray(12);
+pub const SURFACE: Color32 = Color32::from_gray(20);
+pub const RAISED: Color32 = Color32::from_gray(28);
+pub const BORDER: Color32 = Color32::from_gray(42);
 /// Area inset (hasil, input) memakai warna background agar tampak "masuk" ke dalam card.
-pub const INPUT: Color32 = BG;
+pub const INPUT: Color32 = Color32::from_gray(10);
 // Aksen
 pub const ACCENT: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xFB, 0xBF, 0x24);
@@ -100,10 +115,10 @@ pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xFB, 0xBF, 0x24);
 pub const ACCENT_TINT: Color32 = Color32::from_rgba_unmultiplied_const(0xF5, 0x9E, 0x0B, 31);
 pub const ACCENT_BORDER: Color32 = Color32::from_rgb(0x78, 0x35, 0x0F);
 // Teks
-pub const TEXT: Color32 = Color32::from_rgb(0xF5, 0xF5, 0xF4);
-pub const SECONDARY: Color32 = Color32::from_rgb(0xA8, 0xA2, 0x9E);
-pub const MUTED: Color32 = Color32::from_rgb(0x57, 0x53, 0x4E);
-pub const ON_ACCENT: Color32 = BG;
+pub const TEXT: Color32 = Color32::from_gray(245);
+pub const SECONDARY: Color32 = Color32::from_gray(175);
+pub const MUTED: Color32 = Color32::from_gray(112);
+pub const ON_ACCENT: Color32 = Color32::from_rgb(26, 17, 0);
 // Status
 pub const DANGER: Color32 = Color32::from_rgb(0xEF, 0x44, 0x44);
 pub const SUCCESS: Color32 = Color32::from_rgb(0x10, 0xB9, 0x81);
@@ -124,22 +139,10 @@ pub fn icon() -> egui::IconData {
     }
 }
 
-pub fn logo_texture(ctx: &egui::Context) -> egui::TextureHandle {
-    ctx.load_texture(
-        "logo",
-        egui::ColorImage::from_rgba_unmultiplied([LOGO_SIZE, LOGO_SIZE], LOGO_RGBA),
-        egui::TextureOptions::LINEAR,
-    )
-}
-
-/// Ikon Octicons putih 64×64 (premultiplied), diwarnai lewat tint.
-const ICON_SIZE: usize = 64;
-const GITHUB_RGBA: &[u8] = include_bytes!("../assets/icons/mark-github-24-64.rgba");
-const HOME_RGBA: &[u8] = include_bytes!("../assets/icons/home-fill-24-64.rgba");
-const MINIMIZE_RGBA: &[u8] = include_bytes!("../assets/icons/dash-24-64.rgba");
-const CLOSE_RGBA: &[u8] = include_bytes!("../assets/icons/x-24-64.rgba");
-
 pub struct Icons {
+    pub check: egui::TextureHandle,
+    pub caret: egui::TextureHandle,
+    pub chevron: egui::TextureHandle,
     pub github: egui::TextureHandle,
     pub home: egui::TextureHandle,
     pub minimize: egui::TextureHandle,
@@ -148,18 +151,46 @@ pub struct Icons {
 
 impl Icons {
     pub fn load(ctx: &egui::Context) -> Self {
-        let load = |name, rgba| {
+        let load = |name, alpha: &[u8]| {
+            let pixels = alpha
+                .iter()
+                .map(|&a| Color32::from_white_alpha(a))
+                .collect();
             ctx.load_texture(
                 name,
-                egui::ColorImage::from_rgba_premultiplied([ICON_SIZE, ICON_SIZE], rgba),
+                egui::ColorImage::new([64, 64], pixels),
                 egui::TextureOptions::LINEAR,
             )
         };
         Self {
-            github: load("icon-github", GITHUB_RGBA),
-            home: load("icon-home", HOME_RGBA),
-            minimize: load("icon-minimize", MINIMIZE_RGBA),
-            close: load("icon-close", CLOSE_RGBA),
+            github: load(
+                "wire-github",
+                include_bytes!("../assets/icons/wire-github.alpha"),
+            ),
+            home: load(
+                "wire-home",
+                include_bytes!("../assets/icons/wire-home.alpha"),
+            ),
+            minimize: load(
+                "wire-minimize",
+                include_bytes!("../assets/icons/wire-minimize.alpha"),
+            ),
+            close: load(
+                "wire-close",
+                include_bytes!("../assets/icons/wire-close.alpha"),
+            ),
+            chevron: load(
+                "wire-chevron",
+                include_bytes!("../assets/icons/wire-chevron.alpha"),
+            ),
+            check: load(
+                "wire-check",
+                include_bytes!("../assets/icons/wire-check.alpha"),
+            ),
+            caret: load(
+                "wire-caret",
+                include_bytes!("../assets/icons/wire-caret.alpha"),
+            ),
         }
     }
 }
@@ -169,16 +200,20 @@ fn pill(ui: &mut Ui, icon: &egui::TextureHandle, text: Option<&str>, color: Colo
     let mut frame = Frame::new()
         .fill(color.gamma_multiply(0.14))
         .corner_radius(99)
-        .inner_margin(Margin::symmetric(10, 4))
+        .inner_margin(if text.is_some() {
+            Margin::symmetric(13, 7)
+        } else {
+            Margin::same(9)
+        })
         .begin(ui);
     {
         let ui = &mut frame.content_ui;
         ui.spacing_mut().item_spacing.x = 6.0;
         // Induknya right_to_left (header): teks ditambahkan dulu agar ikon tampil di kiri.
         if let Some(text) = text {
-            ui.label(RichText::new(text).font(medium(12.0)).color(color));
+            ui.label(RichText::new(text).font(medium(12.5)).color(color));
         }
-        ui.add(egui::Image::new((icon.id(), vec2(14.0, 14.0))).tint(color));
+        ui.add(egui::Image::new((icon.id(), vec2(16.0, 16.0))).tint(color));
     }
     let response = frame
         .allocate_space(ui)
@@ -261,7 +296,7 @@ pub fn install(ctx: &egui::Context) {
             (TextStyle::Monospace, FontId::monospace(13.0)),
         ]
         .into();
-        style.spacing.item_spacing = vec2(8.0, 8.0);
+        style.spacing.item_spacing = vec2(8.0, 7.0);
         style.spacing.button_padding = vec2(14.0, 7.0);
         style.spacing.interact_size.y = 34.0;
         style.spacing.menu_margin = Margin::same(6);
@@ -322,7 +357,7 @@ pub fn card() -> Frame {
     Frame::new()
         .fill(SURFACE)
         .stroke(Stroke::new(1.0, BORDER))
-        .corner_radius(14)
+        .corner_radius(15)
         .inner_margin(Margin::same(18))
 }
 
@@ -335,7 +370,7 @@ pub fn inset(focused: bool) -> Frame {
             if focused { ACCENT_BORDER } else { BORDER },
         ))
         .corner_radius(10)
-        .inner_margin(Margin::same(12))
+        .inner_margin(Margin::same(13))
 }
 
 pub fn title(ui: &mut Ui, text: &str) {
@@ -347,14 +382,18 @@ pub fn field_label(ui: &mut Ui, text: &str) {
     ui.label(RichText::new(text).size(12.5).color(SECONDARY));
 }
 
+pub const BADGE_PADDING: i8 = 13;
+
 /// Pil status: latar tint dengan teks berwarna.
 pub fn status_badge(ui: &mut Ui, text: &str, color: Color32, background: Color32) {
     Frame::new()
         .fill(background.gamma_multiply(0.14))
         .corner_radius(99)
-        .inner_margin(Margin::symmetric(10, 4))
+        .inner_margin(Margin::symmetric(BADGE_PADDING, 7))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).font(medium(12.0)).color(color));
+            ui.add(
+                egui::Label::new(RichText::new(text).font(medium(12.5)).color(color)).truncate(),
+            );
         })
         .response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, text));

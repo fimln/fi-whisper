@@ -18,7 +18,7 @@ use std::sync::atomic::{AtomicBool, AtomicIsize, Ordering};
 use std::time::Duration;
 use theme::*;
 
-const STACKED_LAYOUT_WIDTH: f32 = 600.0;
+const SETTINGS_SIZE: egui::Vec2 = vec2(668.0, 444.0);
 
 /// Kondisi lintas thread untuk handler tray/hotkey.
 struct Window {
@@ -30,7 +30,8 @@ struct Window {
 struct App {
     core: Handle,
     cloud_usage: Option<(std::time::Instant, String, Result<u64, String>)>,
-    logo: egui::TextureHandle,
+    settings_open: bool,
+    settings_position: Option<egui::Pos2>,
     icons: theme::Icons,
     window: Arc<Window>,
     startup: Option<windows::StartupWindow>,
@@ -64,8 +65,6 @@ struct App {
     form_changed: Option<std::time::Instant>,
     /// Tinggi alami isi kartu per baris/kolom dari frame sebelumnya, agar kartu sebaris sama tinggi.
     rows: [[f32; 2]; 2],
-    /// Tinggi kosong di bawah kartu (frame sebelumnya) yang ditambahkan ke baris bawah.
-    extra: f32,
 }
 
 impl App {
@@ -141,7 +140,8 @@ impl App {
             },
             core,
             cloud_usage: None,
-            logo: theme::logo_texture(&cc.egui_ctx),
+            settings_open: false,
+            settings_position: None,
             icons: theme::Icons::load(&cc.egui_ctx),
             window,
             startup,
@@ -187,7 +187,6 @@ impl App {
             copy_flash: None,
             form_changed: None,
             rows: [[0.0; 2]; 2],
-            extra: 0.0,
         };
         match hotkeys {
             Ok(mut h) => {
@@ -321,31 +320,130 @@ impl App {
             .map(|(_, s)| s.as_str())
     }
 
+    fn screen(&mut self, root: &mut Ui, settings: bool) {
+        let header = egui::Panel::top("header")
+            .resizable(false)
+            .frame(
+                egui::Frame::new()
+                    .fill(BG)
+                    .inner_margin(egui::Margin::symmetric(16, 11)),
+            )
+            .show(root, |ui| {
+                ui.set_min_height(34.0);
+                if settings {
+                    drag_header(ui);
+                    let english = self.config.language == Language::English;
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(if english { "Settings" } else { "Pengaturan" })
+                                .font(semibold(23.0))
+                                .color(TEXT),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if window_badge(
+                                ui,
+                                &self.icons.close,
+                                DANGER,
+                                if english { "Close" } else { "Tutup" },
+                            ) {
+                                self.settings_open = false;
+                            }
+                        });
+                    });
+                } else {
+                    self.header(ui);
+                }
+            });
+        let rect = header.response.rect;
+        root.painter().hline(
+            rect.x_range(),
+            rect.bottom(),
+            egui::Stroke::new(1.0, BORDER),
+        );
+        // Untuk jendela utama, margin ikut berada dalam area gulir agar garis kartu
+        // tidak terpotong oleh batas klip saat koordinat dibulatkan ke piksel fisik.
+        let (panel_margin, content_margin) = if settings {
+            (egui::Margin::symmetric(16, 14), egui::Margin::ZERO)
+        } else {
+            (egui::Margin::ZERO, egui::Margin::same(16))
+        };
+        let body = egui::CentralPanel::default()
+            .frame(egui::Frame::new().fill(BG).inner_margin(panel_margin))
+            .show(root, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt(("body", settings))
+                    .show(ui, |ui| {
+                        egui::Frame::new()
+                            .inner_margin(content_margin)
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                if !self.config_error.is_empty() {
+                                    self.config_error_card(ui);
+                                }
+                                if settings {
+                                    self.row(ui, 1, Self::input_card, Self::model_card);
+                                } else {
+                                    self.row(ui, 0, Self::dictation_card, Self::result_card);
+                                }
+                            });
+                    })
+            });
+        let viewport = root.ctx().content_rect();
+        if !settings
+            && !root.input(|i| {
+                i.viewport().maximized == Some(true) || i.viewport().minimized == Some(true)
+            })
+        {
+            let scroll = body.inner;
+            // Ukur seluruh isi meski terpotong, lalu bulatkan sekali ke piksel fisik.
+            let scale = root.ctx().pixels_per_point();
+            let height = scroll.inner_rect.top() - viewport.top() + scroll.content_size.y;
+            let height = (height * scale).round() / scale;
+            if ((height - viewport.height()) * scale).abs() >= 0.75 {
+                let limit = windows::monitor_work_area(self.window.hwnd.load(Ordering::SeqCst))
+                    .map_or(height, |area| (area.bottom - area.top) as f32 / scale);
+                let height = height.min(limit);
+                if ((height - viewport.height()) * scale).abs() >= 0.75 {
+                    root.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::InnerSize(vec2(
+                            viewport.width(),
+                            height,
+                        )));
+                }
+            }
+        }
+        root.painter().rect_stroke(
+            root.ctx().content_rect(),
+            0.0,
+            egui::Stroke::new(1.0, BORDER),
+            egui::StrokeKind::Inside,
+        );
+    }
+
     fn header(&mut self, ui: &mut Ui) {
         let english = self.config.language == Language::English;
         let t = |id, en| if english { en } else { id };
-        let (phase, backend, loaded) = {
+        let (phase, cpu, loaded) = {
             let st = self.core.status();
             (
                 st.phase,
-                st.backend.clone(),
+                st.backend.starts_with("CPU"),
                 st.loaded.as_ref().map(|l| l.0),
             )
         };
-        // Tanpa title bar OS: area kosong header menjadi pegangan geser jendela. Didaftarkan
-        // sebelum isi header agar tombol dan badge tetap menerima klik.
-        let drag = ui.interact(
-            ui.max_rect().expand2(vec2(16.0, 12.0)),
-            ui.scope_id().with("drag"),
-            egui::Sense::click_and_drag(),
-        );
-        if drag.drag_started_by(egui::PointerButton::Primary) {
-            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-        }
+        drag_header(ui);
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 10.0;
-            ui.add(egui::Image::new((self.logo.id(), vec2(30.0, 30.0))));
-            ui.label(RichText::new("fi-whisper").font(semibold(21.0)).color(TEXT));
+            ui.spacing_mut().item_spacing.x = 11.0;
+            let (rect, _) = ui.allocate_exact_size(vec2(30.0, 30.0), egui::Sense::hover());
+            ui.painter().rect_filled(rect, 7.0, ACCENT);
+            ui.painter().text(
+                rect.center(),
+                egui::Align2::CENTER_CENTER,
+                "fi",
+                semibold(18.0),
+                ON_ACCENT,
+            );
+            ui.label(RichText::new("fi-whisper").font(semibold(23.0)).color(TEXT));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 if window_badge(ui, &self.icons.close, DANGER, t("Tutup", "Close")) {
@@ -380,31 +478,28 @@ impl App {
                     animated[1] as u8,
                     animated[2] as u8,
                 );
-                status_badge(ui, phase_label(phase, english), color, background);
-
-                {
-                    let engine = loaded.unwrap_or(self.engine);
-                    // Lewati badge mesin bila jendela terlalu sempit agar tidak menimpa judul.
-                    let text = if engine.is_cloud() {
-                        engine.short().to_owned()
-                    } else {
-                        format!("{}, {backend}", engine.short())
-                    };
-                    let width = ui
-                        .painter()
-                        .layout_no_wrap(text.clone(), medium(12.0), SECONDARY)
-                        .size()
-                        .x
-                        + 28.0;
-                    if ui.available_width() >= width {
-                        let badge_color = if !engine.is_cloud() && backend.starts_with("CPU") {
-                            WARN
-                        } else {
-                            SECONDARY
-                        };
-                        status_badge(ui, &text, badge_color, badge_color);
-                    }
-                }
+                let engine = loaded.unwrap_or(self.engine);
+                let (model, tint) = if cpu && !engine.is_cloud() {
+                    (format!("{}, CPU", engine.short()), WARN)
+                } else {
+                    (engine.short().to_owned(), SECONDARY)
+                };
+                // Sisakan lebar pil model sebelum menggambar status dalam layout kanan-ke-kiri.
+                let model_width = ui
+                    .painter()
+                    .layout_no_wrap(model.clone(), medium(12.5), tint)
+                    .size()
+                    .x
+                    + 2.0 * BADGE_PADDING as f32;
+                let status_width =
+                    (ui.available_width() - model_width - ui.spacing().item_spacing.x)
+                        .floor()
+                        .max(0.0);
+                ui.scope(|ui| {
+                    ui.set_max_width(status_width);
+                    status_badge(ui, phase_label(phase, english), color, background);
+                });
+                status_badge(ui, &model, tint, tint);
             });
         });
     }
@@ -427,7 +522,6 @@ impl App {
         } else {
             self.level = 0.0;
         }
-        let (note, error) = (st.note.clone(), st.error.clone());
         let ready = st.loaded.is_some();
         drop(st);
 
@@ -446,8 +540,9 @@ impl App {
                 }
             });
         });
-        ui.add_space(4.0);
+        ui.add_space(18.0);
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
             ui.label(
                 RichText::new(format!(
                     "{:02}:{:02}",
@@ -455,17 +550,15 @@ impl App {
                     duration.as_secs() % 60
                 ))
                 .monospace()
-                .size(36.0)
+                .size(42.0)
                 .color(if recording { TEXT } else { SECONDARY }),
             );
-            ui.label(RichText::new("/ 02:00").monospace().color(MUTED));
+            ui.label(RichText::new("/ 02:00").monospace().size(14.0).color(MUTED));
             if recording {
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    rec_indicator(ui);
-                });
+                rec_indicator(ui);
             }
         });
-        ui.add_space(2.0);
+        ui.add_space(18.0);
         meter(
             ui,
             recording,
@@ -475,26 +568,14 @@ impl App {
             ),
             self.level,
         );
-        ui.add_space(6.0);
+        ui.add_space(18.0);
         ui.horizontal(|ui| {
-            let vocabulary_label = t("Kosakata", "Vocabulary");
+            let settings_label = t("Pengaturan", "Settings");
             let start = t("Mulai dikte", "Start dictation");
             let done = t("Selesai", "Done");
             let processing = t("Memproses…", "Processing…");
             let loading = t("Memuat…", "Loading…");
-            let width = [start, done, processing, loading, vocabulary_label]
-                .into_iter()
-                .map(|text| {
-                    ui.painter()
-                        .layout_no_wrap(text.to_owned(), medium(14.0), TEXT)
-                        .size()
-                        .x
-                })
-                .fold(0.0, f32::max)
-                .ceil()
-                + 2.0
-                    * (ui.spacing().button_padding.x
-                        + ui.visuals().widgets.inactive.bg_stroke.width);
+            let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             let (enabled, label) = match phase {
                 Phase::Recording => (true, done),
                 Phase::Transcribing => (false, processing),
@@ -506,9 +587,25 @@ impl App {
                 self.core.send(Cmd::Toggle(Source::Gui));
             }
             if !matches!(phase, Phase::Recording | Phase::Transcribing)
-                && dictation_button(ui, true, None, width, vocabulary_label).clicked()
+                && dictation_button(ui, true, None, width, settings_label).clicked()
             {
-                self.vocabulary_draft = Some(self.config.vocabulary.as_str().to_owned());
+                if !self.settings_open {
+                    let scale = ui.ctx().pixels_per_point();
+                    self.settings_position = windows::monitor_work_area(
+                        self.window.hwnd.load(Ordering::SeqCst),
+                    )
+                    .map(|area| {
+                        egui::pos2(
+                            (area.left as f32 + area.right as f32) / (2.0 * scale)
+                                - SETTINGS_SIZE.x / 2.0,
+                            (area.top as f32 + area.bottom as f32) / (2.0 * scale)
+                                - SETTINGS_SIZE.y / 2.0,
+                        )
+                    });
+                }
+                self.settings_open = true;
+                ui.ctx()
+                    .send_viewport_cmd_to(settings_id(), egui::ViewportCommand::Focus);
             }
             if matches!(phase, Phase::Recording | Phase::Transcribing)
                 && secondary(ui, true, t("Batalkan", "Cancel")).clicked()
@@ -516,30 +613,6 @@ impl App {
                 self.core.send(Cmd::Cancel);
             }
         });
-        if !error.is_empty() {
-            ui.label(
-                RichText::new(message(&error, english))
-                    .small()
-                    .color(DANGER),
-            );
-        }
-        if !note.is_empty() {
-            ui.label(
-                RichText::new(message(&note, english))
-                    .small()
-                    .color(SECONDARY),
-            );
-        }
-        if !ready && matches!(phase, Phase::MissingModel | Phase::Error) {
-            ui.label(
-                RichText::new(t(
-                    "Pilih model ASR dan VAD, lalu tekan Muat model.",
-                    "Select ASR and VAD models, then press Load model.",
-                ))
-                .small()
-                .color(SECONDARY),
-            );
-        }
     }
 
     fn vocabulary_dialog(&mut self, ctx: &egui::Context) {
@@ -595,7 +668,9 @@ impl App {
             self.result_flash = Some(std::time::Instant::now());
         }
         let flash = flash_amount(ui, self.result_flash, 0.6);
+        let result_height = 104.0;
         title(ui, t("Hasil terakhir", "Last result"));
+        ui.add_space(4.0);
         inset(false)
             .stroke(egui::Stroke::new(
                 1.0,
@@ -605,11 +680,11 @@ impl App {
                 ui.set_width(ui.available_width());
                 egui::ScrollArea::vertical()
                     .id_salt("result")
-                    .min_scrolled_height(110.0)
-                    .max_height(110.0)
+                    .min_scrolled_height(result_height)
+                    .max_height(result_height)
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        ui.set_min_height(110.0);
+                        ui.set_min_height(result_height);
                         if result.is_empty() {
                             ui.label(
                                 RichText::new(t(
@@ -627,6 +702,7 @@ impl App {
                         }
                     });
             });
+        ui.add_space(4.0);
         let status = match (result.is_empty(), result_note.as_str()) {
             (false, COPIED) => Some(t(COPIED, "Copied to clipboard.")),
             (false, "") => Some(t("Selesai", "Done")),
@@ -663,7 +739,7 @@ impl App {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     let text_width = |ui: &Ui, s: &str, color| {
                         ui.painter()
-                            .layout_no_wrap(s.to_owned(), egui::FontId::proportional(12.0), color)
+                            .layout_no_wrap(s.to_owned(), egui::FontId::proportional(10.0), color)
                             .size()
                             .x
                     };
@@ -693,7 +769,7 @@ impl App {
                             (avail >= text_width(ui, &short, SECONDARY)).then_some(short)
                         };
                         if let Some(label) = label {
-                            ui.label(RichText::new(label).small().color(SECONDARY))
+                            ui.label(RichText::new(label).size(10.0).color(SECONDARY))
                                 .on_hover_text(format!(
                                     "VAD {:.2} s, ASR {:.2} s",
                                     tm.vad.as_secs_f32(),
@@ -750,6 +826,7 @@ impl App {
                     .width(width)
                     .truncate()
                     .selected_text(selected),
+                &self.icons.chevron,
                 |ui| {
                     changed |= interactive(ui, |ui| {
                         ui.selectable_value(
@@ -782,6 +859,7 @@ impl App {
                     egui::ComboBox::from_id_salt("language")
                         .width(width)
                         .selected_text(self.config.language.label()),
+                    &self.icons.chevron,
                     |ui| {
                         for language in Language::ALL {
                             changed |= interactive(ui, |ui| {
@@ -824,12 +902,27 @@ impl App {
             });
         });
         ui.add_enabled_ui(idle, |ui| {
-            changed |= ui
-                .checkbox(
-                    &mut self.config.hold_to_talk,
-                    t("Tahan shortcut untuk bicara", "Hold shortcut to talk"),
-                )
-                .changed();
+            ui.spacing_mut().interact_size.y = 22.0;
+            ui.spacing_mut().icon_width = 16.0;
+            ui.spacing_mut().icon_spacing = 8.0;
+            let label = t("Tahan shortcut untuk bicara", "Hold shortcut to talk");
+            let response = ui.checkbox(&mut self.config.hold_to_talk, label);
+            changed |= response.changed();
+            let rect = egui::Rect::from_center_size(
+                egui::pos2(response.rect.left() + 8.0, response.rect.center().y),
+                vec2(16.0, 16.0),
+            );
+            ui.painter().rect(
+                rect,
+                4.0,
+                INPUT,
+                egui::Stroke::new(1.0, MUTED),
+                egui::StrokeKind::Inside,
+            );
+            if self.config.hold_to_talk {
+                egui::Image::new((self.icons.check.id(), vec2(12.0, 12.0)))
+                    .paint_at(ui, rect.shrink(2.0));
+            }
         });
         if !self.mic_error.is_empty() {
             ui.label(
@@ -871,6 +964,7 @@ impl App {
                     1 => t("Sembunyikan ke tray", "Hide to tray"),
                     _ => t("Keluar dari aplikasi", "Quit application"),
                 }),
+            &self.icons.chevron,
             |ui| {
                 ui.add_enabled_ui(tray, |ui| {
                     ui.selectable_value(&mut selected, 1, t("Sembunyikan ke tray", "Hide to tray"));
@@ -930,6 +1024,7 @@ impl App {
                 egui::ComboBox::from_id_salt("engine")
                     .width(ui.available_width())
                     .selected_text(self.engine.label()),
+                &self.icons.chevron,
                 |ui| {
                     for engine in Engine::ALL {
                         interactive(ui, |ui| {
@@ -1022,6 +1117,9 @@ impl App {
                         asr,
                         vad,
                     });
+                }
+                if secondary(ui, true, t("Kosakata", "Vocabulary")).clicked() {
+                    self.vocabulary_draft = Some(self.config.vocabulary.as_str().to_owned());
                 }
                 if phase == Phase::Loading {
                     ui.label(RichText::new("Memuat…").small().color(SECONDARY));
@@ -1184,6 +1282,7 @@ impl App {
                     egui::ComboBox::from_id_salt("cloud-region")
                         .width(width)
                         .selected_text(&self.config.google.region),
+                    &self.icons.chevron,
                     |ui| {
                         for region in ["us", "eu"] {
                             changed |= interactive(ui, |ui| {
@@ -1221,7 +1320,14 @@ impl App {
         self.cloud_usage_label(ui, &project, limit, 0.016);
         interactive(ui, |ui| {
             egui::CollapsingHeader::new(RichText::new("Setup ADC").small().color(SECONDARY))
-                .id_salt("setup-adc")
+                .icon({
+                    let texture = self.icons.caret.id();
+                    move |ui, openness, response| {
+                        egui::Image::new((texture, vec2(10.0,10.0))).tint(SECONDARY)
+                            .rotate(openness * std::f32::consts::FRAC_PI_2, egui::pos2(0.5,0.5).to_vec2())
+                            .paint_at(ui, egui::Rect::from_center_size(response.rect.center(),vec2(10.0,10.0)));
+                    }
+                }).id_salt("setup-adc")
                 .show(ui, |ui| {
                     ui.label(
                         RichText::new(t(
@@ -1320,7 +1426,7 @@ impl App {
         left: fn(&mut Self, &mut Ui),
         right: fn(&mut Self, &mut Ui),
     ) {
-        if ui.available_width() < STACKED_LAYOUT_WIDTH {
+        if index == 1 && ui.available_width() < 600.0 {
             for add in [left, right] {
                 card().show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -1330,12 +1436,9 @@ impl App {
             return;
         }
         let previous = self.rows[index];
-        // Baris atas tetap stabil saat tinggi form pada baris bawah berubah.
-        let target = if index == 0 {
-            previous[0].max(previous[1])
-        } else {
-            previous[0].max(previous[1]) + self.extra
-        };
+        let target = previous[0]
+            .max(previous[1])
+            .max(if index == 0 { 209.0 } else { 316.0 });
         let mut heights = [0.0; 2];
         ui.columns_const(|[l, r]: &mut [Ui; 2]| {
             for (col, (ui, add)) in [(l, left), (r, right)].into_iter().enumerate() {
@@ -1358,6 +1461,21 @@ impl App {
             ui.ctx().request_discard("row height");
             ui.ctx().request_repaint();
         }
+    }
+}
+
+fn settings_id() -> egui::ViewportId {
+    egui::ViewportId::from_hash_of("settings")
+}
+
+fn drag_header(ui: &mut Ui) {
+    let drag = ui.interact(
+        ui.max_rect().expand2(vec2(16.0, 11.0)),
+        ui.scope_id().with("drag"),
+        egui::Sense::click_and_drag(),
+    );
+    if drag.drag_started_by(egui::PointerButton::Primary) {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
     }
 }
 
@@ -1400,9 +1518,9 @@ fn keycap(ui: &mut Ui, text: &str) {
         .fill(RAISED)
         .stroke(egui::Stroke::new(1.0, BORDER))
         .corner_radius(6)
-        .inner_margin(egui::Margin::symmetric(8, 3))
+        .inner_margin(egui::Margin::symmetric(13, 8))
         .show(ui, |ui| {
-            ui.label(RichText::new(text).monospace().size(11.5).color(SECONDARY));
+            ui.label(RichText::new(text).monospace().size(12.5).color(SECONDARY));
         })
         .response
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Keyboard, true, text));
@@ -1412,11 +1530,11 @@ fn keycap(ui: &mut Ui, text: &str) {
 fn rec_indicator(ui: &mut Ui) {
     let t = ui.input(|i| i.time) as f32;
     let pulse = 0.55 + 0.45 * (t * 4.0).sin().abs();
-    ui.label(RichText::new("REC").font(semibold(12.0)).color(DANGER));
     let (rect, _) = ui.allocate_exact_size(vec2(14.0, 14.0), egui::Sense::hover());
     let painter = ui.painter();
     painter.circle_filled(rect.center(), 7.0, DANGER.gamma_multiply(0.2 * pulse));
     painter.circle_filled(rect.center(), 4.0, DANGER.gamma_multiply(pulse));
+    ui.label(RichText::new("REC").font(semibold(12.0)).color(DANGER));
 }
 
 fn meter_fraction(level: f32) -> f32 {
@@ -1441,7 +1559,7 @@ fn flash_amount(ui: &Ui, started: Option<std::time::Instant>, duration: f32) -> 
 
 fn meter(ui: &mut Ui, active: bool, busy: bool, level: f32) {
     let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), 36.0), egui::Sense::hover());
+        ui.allocate_exact_size(vec2(ui.available_width(), 4.0), egui::Sense::hover());
     let fraction = meter_fraction(level);
     response.widget_info(|| {
         let mut info = egui::WidgetInfo::new(egui::Role::Meter);
@@ -1449,38 +1567,18 @@ fn meter(ui: &mut Ui, active: bool, busy: bool, level: f32) {
         info.value = Some((fraction * 100.0).round().into());
         info
     });
-    let count = ((rect.width() / 6.0) as usize).max(8);
-    let step = rect.width() / count as f32;
-    let exact = fraction * count as f32;
-    let filled = exact.ceil() as usize;
-    let t = ui.input(|i| i.time) as f32;
-    for i in 0..count {
-        let on = active && i < filled;
-        let edge = (exact - i as f32).clamp(0.0, 1.0);
-        let processing = busy && ((i as f32 - (t * 12.0) % (count as f32 + 8.0) + 8.0).abs() < 3.0);
-        // Tinggi bar bervariasi mengikuti dinamika suara dan meluruh halus di batang ujung.
-        let wave = 0.55 + 0.45 * ((i as f32 * 0.9 + t * 7.0).sin() * 0.5 + 0.5);
-        let height = if on {
-            6.0 + 26.0 * wave * (0.35 + 0.65 * fraction) * edge
-        } else if processing {
-            10.0
-        } else {
-            4.0
-        };
-        let bar = egui::Rect::from_center_size(
-            egui::pos2(rect.left() + (i as f32 + 0.5) * step, rect.center().y),
-            vec2((step - 3.0).max(1.0), height),
-        );
-        let color = if processing {
-            ACCENT
-        } else if !on {
-            BORDER
-        } else if i + 1 == filled {
-            ACCENT_HOVER
-        } else {
-            ACCENT
-        };
-        ui.painter().rect_filled(bar, 2.0, color);
+    ui.painter().rect_filled(rect, 3.0, BORDER);
+    let fill = if busy {
+        let offset = ((ui.input(|i| i.time) as f32 * 2.0).sin() + 1.0) * 0.4;
+        egui::Rect::from_min_size(
+            rect.min + vec2(rect.width() * offset, 0.0),
+            vec2(rect.width() * 0.2, rect.height()),
+        )
+    } else {
+        egui::Rect::from_min_size(rect.min, vec2(rect.width() * fraction, rect.height()))
+    };
+    if busy || (active && fraction > 0.0) {
+        ui.painter().rect_filled(fill, 3.0, ACCENT);
     }
 }
 
@@ -1618,6 +1716,8 @@ impl eframe::App for App {
             .is_some_and(|startup| startup.ready(ctx))
         {
             if self.start_in_tray && self.tray.is_some() {
+                self.settings_open = false;
+                self.vocabulary_draft = None;
                 windows::hide_window(self.window.hwnd.load(Ordering::SeqCst));
                 if !self.core.status().phase.busy() {
                     windows::trim_idle_memory();
@@ -1635,6 +1735,8 @@ impl eframe::App for App {
             && self.tray.is_some()
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.settings_open = false;
+            self.vocabulary_draft = None;
             windows::hide_window(self.window.hwnd.load(Ordering::SeqCst));
             if !self.core.status().phase.busy() {
                 windows::trim_idle_memory();
@@ -1646,139 +1748,33 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, root: &mut Ui, _frame: &mut eframe::Frame) {
-        egui::Panel::top("header")
-            .resizable(false)
-            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin {
-                left: 16,
-                right: 16,
-                top: 12,
-                bottom: 10,
-            }))
-            .show(root, |ui| self.header(ui));
-        egui::CentralPanel::default()
-            .frame(egui::Frame::new().fill(BG).inner_margin(egui::Margin {
-                left: 16,
-                right: 16,
-                top: 12,
-                bottom: 16,
-            }))
-            .show(root, |ui| {
-                let available = ui.available_height();
-                // Cadangan bila jendela diperkecil atau pesan error panjang membuat isi melebihi tinggi.
-                let style = ui.style().clone();
-                let scroll = &mut ui.spacing_mut().scroll;
-                scroll.foreground_color = true;
-                scroll.floating_width = 5.0;
-                scroll.bar_width = 8.0;
-                scroll.dormant_handle_opacity = 0.10;
-                scroll.active_handle_opacity = 0.18;
-                scroll.interact_handle_opacity = 0.30;
-                egui::ScrollArea::vertical()
-                    .scroll_bar_visibility(
-                        egui::scroll_area::ScrollBarVisibility::VisibleWhenNeeded,
-                    )
-                    .show(ui, |ui| {
-                        ui.set_style(style);
-                        ui.set_width(ui.available_width());
-                        if !self.config_error.is_empty() {
-                            self.config_error_card(ui);
-                        }
-                        self.row(ui, 0, Self::dictation_card, Self::result_card);
-                        self.row(ui, 1, Self::input_card, Self::model_card);
-                        // Koreksi linear dari frame ini; stabil setelah satu pass tambahan.
-                        // Dibulatkan ke bawah agar pembulatan piksel tidak memunculkan scrollbar.
-                        let used = ui.min_rect().height();
-                        let extra = if ui.available_width() < STACKED_LAYOUT_WIDTH {
-                            0.0
-                        } else {
-                            (self.extra + available - used - 1.0).max(0.0).floor()
-                        };
-                        if (extra - self.extra).abs() >= 1.0 {
-                            self.extra = extra;
-                            ui.ctx().request_discard("extra height");
-                            ui.ctx().request_repaint();
-                        }
-                    });
-            });
-        root.painter().rect_stroke(
-            root.ctx().content_rect(),
-            0.0,
-            egui::Stroke::new(1.0, BORDER),
-            egui::StrokeKind::Inside,
-        );
-        resize_edges(root);
-        self.vocabulary_dialog(root.ctx());
-    }
-}
-
-/// Jendela tanpa dekorasi tidak punya bingkai resize dari OS (winit membuang area non-client),
-/// jadi tepi dan sudut jendela dijadikan pegangan `BeginResize`. Didaftarkan terakhir agar
-/// menang atas widget di bawahnya; sudut setelah tepi agar diagonal diprioritaskan.
-fn resize_edges(ui: &mut Ui) {
-    use egui::{CursorIcon as C, ResizeDirection as D, pos2};
-    let r = ui.ctx().content_rect();
-    let (e, k) = (5.0, 12.0);
-    let edges = [
-        (
-            pos2(r.left(), r.top()),
-            pos2(r.right(), r.top() + e),
-            D::North,
-            C::ResizeNorth,
-        ),
-        (
-            pos2(r.left(), r.bottom() - e),
-            pos2(r.right(), r.bottom()),
-            D::South,
-            C::ResizeSouth,
-        ),
-        (
-            pos2(r.left(), r.top()),
-            pos2(r.left() + e, r.bottom()),
-            D::West,
-            C::ResizeWest,
-        ),
-        (
-            pos2(r.right() - e, r.top()),
-            pos2(r.right(), r.bottom()),
-            D::East,
-            C::ResizeEast,
-        ),
-        (
-            pos2(r.left(), r.top()),
-            pos2(r.left() + k, r.top() + k),
-            D::NorthWest,
-            C::ResizeNorthWest,
-        ),
-        (
-            pos2(r.right() - k, r.top()),
-            pos2(r.right(), r.top() + k),
-            D::NorthEast,
-            C::ResizeNorthEast,
-        ),
-        (
-            pos2(r.left(), r.bottom() - k),
-            pos2(r.left() + k, r.bottom()),
-            D::SouthWest,
-            C::ResizeSouthWest,
-        ),
-        (
-            pos2(r.right() - k, r.bottom() - k),
-            pos2(r.right(), r.bottom()),
-            D::SouthEast,
-            C::ResizeSouthEast,
-        ),
-    ];
-    for (i, (min, max, dir, cursor)) in edges.into_iter().enumerate() {
-        let response = ui
-            .interact(
-                egui::Rect::from_min_max(min, max),
-                ui.scope_id().with(("resize", i)),
-                egui::Sense::drag(),
-            )
-            .on_hover_cursor(cursor);
-        if response.drag_started_by(egui::PointerButton::Primary) {
-            ui.ctx()
-                .send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+        self.screen(root, false);
+        if self.settings_open {
+            let title = if self.config.language == Language::English {
+                "Settings"
+            } else {
+                "Pengaturan"
+            };
+            let mut builder = egui::ViewportBuilder::default()
+                .with_title(title)
+                .with_inner_size(SETTINGS_SIZE)
+                .with_resizable(false)
+                .with_maximize_button(false)
+                .with_decorations(false);
+            if let Some(position) = self.settings_position {
+                builder = builder.with_position(position);
+            }
+            root.ctx()
+                .show_viewport_immediate(settings_id(), builder, |ui, _| {
+                    if ui.input(|i| i.viewport().close_requested()) {
+                        self.settings_open = false;
+                    }
+                    self.screen(ui, true);
+                    self.vocabulary_dialog(ui.ctx());
+                });
+            if !self.settings_open {
+                self.vocabulary_draft = None;
+            }
         }
     }
 }
@@ -1791,8 +1787,9 @@ fn main() -> eframe::Result {
         "fi-whisper",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([700.0, 736.0])
-                .with_min_inner_size([560.0, 600.0])
+                .with_inner_size([620.0, 338.0])
+                .with_resizable(false)
+                .with_maximize_button(false)
                 .with_decorations(false)
                 // Tray memakai SW_HIDE; taskbar tetap aktif saat jendela dibuka kembali.
                 .with_taskbar(true)
@@ -1811,7 +1808,6 @@ fn message(text: &str, english: bool) -> String {
     }
     let mut text = text.to_owned();
     for (id, en) in [
-        ("Hasil hanya tampil di sini.", "Results appear only here."),
         (
             "Tidak ada jendela tujuan; hasil hanya tampil di sini.",
             "No target window; results appear only here.",
@@ -1822,7 +1818,6 @@ fn message(text: &str, english: bool) -> String {
         ),
         ("Memasukkan teks…", "Inserting text…"),
         ("Tidak ada ucapan terdeteksi.", "No speech detected."),
-        ("Proses dibatalkan.", "Processing cancelled."),
         (
             "Rekaman dibatalkan; audio dibuang.",
             "Recording cancelled; audio discarded.",
