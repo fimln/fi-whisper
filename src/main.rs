@@ -1079,8 +1079,38 @@ impl App {
                 t("Tidak ada pemutaran", "Nothing playing").into()
             };
             ui.label(RichText::new(label).small().color(MUTED));
+            let audio_error = status.audio_error.map(|error| {
+                use focus::OutputError::*;
+                match error {
+                    NoDevice => t(
+                        "Tidak ada perangkat keluaran audio",
+                        "No audio output device",
+                    )
+                    .into(),
+                    Configuration => t(
+                        "Gagal membaca konfigurasi perangkat",
+                        "Could not read device configuration",
+                    )
+                    .into(),
+                    UnsupportedFormat(format) => format!(
+                        "{} ({format})",
+                        t("Format audio tidak didukung", "Unsupported output format")
+                    ),
+                    Open => t(
+                        "Gagal membuka perangkat audio",
+                        "Could not open audio device",
+                    )
+                    .into(),
+                    Play => t("Gagal memulai pemutaran", "Could not start playback").into(),
+                    Unavailable => t(
+                        "Perangkat audio tidak tersedia",
+                        "Audio output device unavailable",
+                    )
+                    .into(),
+                }
+            });
             for (label, error) in [
-                (t("Keluaran audio", "Audio output"), status.audio_error),
+                (t("Keluaran audio", "Audio output"), audio_error),
                 (
                     t("Kontrol media Windows", "Windows media controls"),
                     status.media_error,

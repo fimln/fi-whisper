@@ -1,3 +1,4 @@
+use super::OutputError;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use cpal::{FromSample, SizedSample};
 use std::sync::{
@@ -43,11 +44,13 @@ impl BrownHighPass {
 pub(super) fn open(
     state: Arc<AtomicU8>,
     failed: impl Fn() + Send + 'static,
-) -> Result<cpal::Stream, String> {
+) -> Result<cpal::Stream, OutputError> {
     let device = cpal::default_host()
         .default_output_device()
-        .ok_or("No audio output device")?;
-    let config = device.default_output_config().map_err(|e| e.to_string())?;
+        .ok_or(OutputError::NoDevice)?;
+    let config = device
+        .default_output_config()
+        .map_err(|_| OutputError::Configuration)?;
     let channels = usize::from(config.channels());
     let sample = generator(state, channels, config.sample_rate());
     let err = move |e: cpal::Error| {
@@ -81,10 +84,10 @@ pub(super) fn open(
         cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, sample, err),
         cpal::SampleFormat::I16 => build::<i16>(&device, config, channels, sample, err),
         cpal::SampleFormat::U16 => build::<u16>(&device, config, channels, sample, err),
-        _ => return Err(format!("Unsupported output format ({format})")),
+        _ => return Err(OutputError::UnsupportedFormat(format)),
     }
-    .map_err(|e| e.to_string())?;
-    stream.play().map_err(|e| e.to_string())?;
+    .map_err(|_| OutputError::Open)?;
+    stream.play().map_err(|_| OutputError::Play)?;
     Ok(stream)
 }
 
@@ -113,7 +116,7 @@ fn generator(state: Arc<AtomicU8>, channels: usize, sample_rate: u32) -> impl Fn
                 if gain == 0.0 {
                     mode = target;
                 }
-            } else {
+            } else if mode != 0 {
                 gain = (gain + step).min(1.0);
             }
         }
@@ -150,6 +153,77 @@ fn generator(state: Arc<AtomicU8>, channels: usize, sample_rate: u32) -> impl Fn
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::focus::Noise;
+
+    #[test]
+    fn noise_levels_and_frequency_content_match_each_color() {
+        for (noise, roughness) in [
+            (Noise::White, 1.8..2.2),
+            (Noise::Pink, 0.25..0.45),
+            (Noise::Brown, 0.004..0.015),
+        ] {
+            let mode = Arc::new(AtomicU8::new(noise as u8));
+            let mut sample = generator(mode, 1, 48_000);
+            for _ in 0..2_000 {
+                sample(0);
+            }
+            let mut previous = sample(0);
+            let mut energy = 0.0;
+            let mut differences = 0.0;
+            for _ in 0..48_000 {
+                let value = sample(0);
+                assert!(value.abs() <= 1.0, "{noise:?} clipping");
+                energy += value * value;
+                differences += (value - previous).powi(2);
+                previous = value;
+            }
+            assert!(
+                (0.012..0.030).contains(&(energy / 48_000.0).sqrt()),
+                "{noise:?} RMS"
+            );
+            // Energi selisih antarsampel mengukur porsi frekuensi tinggi.
+            assert!(
+                roughness.contains(&(differences / energy)),
+                "{noise:?} spectrum"
+            );
+        }
+    }
+
+    #[test]
+    fn generator_fades_in_switches_at_zero_and_fades_to_silence() {
+        // Pada 12.800 Hz, fade 20 ms tepat 256 frame.
+        let mode = Arc::new(AtomicU8::new(0));
+        let mut sample = generator(mode.clone(), 1, 12_800);
+        for _ in 0..256 {
+            assert_eq!(sample(0), 0.0);
+        }
+        mode.store(Noise::White as u8, Ordering::Relaxed);
+        // Filter pink dan PRNG sama pada kedua laju sampel. Fade satu frame
+        // pada referensi memberi nilai sebelum penguatan untuk setiap sampel.
+        let reference_mode = Arc::new(AtomicU8::new(Noise::White as u8));
+        let mut reference = generator(reference_mode.clone(), 1, 50);
+        assert_eq!(sample(0), reference(0));
+        for frame in 1..=256 {
+            assert_eq!(sample(0), reference(0) * (frame as f32 / 256.0));
+        }
+        mode.store(Noise::Pink as u8, Ordering::Relaxed);
+        for frame in 1..256 {
+            assert_eq!(sample(0), reference(0) * (1.0 - frame as f32 / 256.0));
+        }
+        reference_mode.store(Noise::Pink as u8, Ordering::Relaxed);
+        assert_eq!(sample(0), 0.0);
+        assert_eq!(reference(0), 0.0);
+        for frame in 1..=256 {
+            assert_eq!(sample(0), reference(0) * (frame as f32 / 256.0));
+        }
+        mode.store(0, Ordering::Relaxed);
+        for frame in 1..=256 {
+            assert_eq!(sample(0), reference(0) * (1.0 - frame as f32 / 256.0));
+        }
+        for _ in 0..256 {
+            assert_eq!(sample(0), 0.0);
+        }
+    }
 
     #[test]
     #[ignore = "memerlukan mikrofon dan perangkat output Windows"]
