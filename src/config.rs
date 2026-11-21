@@ -179,6 +179,7 @@ pub struct Config {
     /// `true`: tombol close menyembunyikan jendela ke tray. `false`: keluar dari aplikasi.
     pub close_to_tray: bool,
     pub auto_startup: bool,
+    pub focus_enabled: bool,
 }
 
 impl Default for Config {
@@ -198,6 +199,7 @@ impl Default for Config {
             shortcut: "Ctrl+Alt+Space".into(),
             close_to_tray: true,
             auto_startup: false,
+            focus_enabled: false,
         }
     }
 }
@@ -379,6 +381,7 @@ mod tests {
     fn missing_fields_use_defaults() {
         let config: Config = serde_json::from_str(r#"{"language":"en"}"#).unwrap();
         assert_eq!(config.language, Language::English);
+        assert!(!config.focus_enabled);
         assert_eq!(config.engine, Engine::Whisper);
         let config: Config = serde_json::from_str(r#"{"engine":"qwen3-asr"}"#).unwrap();
         assert_eq!(config.engine, Engine::Qwen3Asr);

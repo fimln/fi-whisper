@@ -18,6 +18,7 @@ Copy-Item (Join-Path $root 'assets\logo.ico') $dist
 foreach ($dll in 'cublas64_13.dll', 'cublasLt64_13.dll', 'nvrtc64_130_0.dll', 'nvrtc-builtins64_132.dll', 'curand64_10.dll') { Copy-Item (Join-Path $cuda "bin\x64\$dll") $dist }
 Copy-Item (Join-Path $cuda 'LICENSE') (Join-Path $dist 'licenses\NVIDIA-CUDA-EULA.txt')
 Copy-Item (Join-Path $root 'LICENSE') (Join-Path $dist 'licenses\fi-whisper-MIT.txt')
+Copy-Item (Join-Path $root 'assets\LICENSE-5mdt.txt') (Join-Path $dist 'licenses')
 Copy-Item (Join-Path $root 'fonts\*.txt') (Join-Path $dist 'licenses')
 Copy-Item (Join-Path $root 'README.md'), (Join-Path $root 'docs\CREDITS.md') $dist
 Get-ChildItem $dist -Recurse -File | Select-Object @{ n = 'File'; e = { $_.FullName.Substring($dist.Length + 1) } }, @{ n = 'MB'; e = { [Math]::Round($_.Length / 1MB, 1) } }
