@@ -515,6 +515,7 @@ impl App {
         let t = |id, en| if english { en } else { id };
         let st = self.core.status();
         let phase = st.phase;
+        let notice = dictation_notice(phase, &st.error, &st.note, english);
         let recording = phase == Phase::Recording;
         let duration = st
             .recording_since
@@ -564,17 +565,7 @@ impl App {
                 rec_indicator(ui);
             }
         });
-        ui.add_space(18.0);
-        meter(
-            ui,
-            recording,
-            matches!(
-                phase,
-                Phase::Loading | Phase::Starting | Phase::Transcribing
-            ),
-            self.level,
-        );
-        ui.add_space(18.0);
+        dictation_feedback(ui, phase, self.level, notice.as_deref());
         ui.horizontal(|ui| {
             let settings_label = t("Pengaturan", "Settings");
             let start = t("Mulai dikte", "Start dictation");
@@ -1717,9 +1708,51 @@ fn flash_amount(ui: &Ui, started: Option<std::time::Instant>, duration: f32) -> 
     value
 }
 
-fn meter(ui: &mut Ui, active: bool, busy: bool, level: f32) {
-    let (rect, response) =
-        ui.allocate_exact_size(vec2(ui.available_width(), 4.0), egui::Sense::hover());
+fn dictation_notice(phase: Phase, error: &str, note: &str, english: bool) -> Option<String> {
+    let text = match phase {
+        Phase::Error => match error {
+            "Project ID Google Cloud tidak valid." => {
+                "Periksa Project ID Google Cloud di Pengaturan."
+            }
+            "" => "Dikte gagal. Coba lagi.",
+            detail => detail,
+        },
+        Phase::MissingModel => "Muat model ASR dan VAD di Pengaturan terlebih dahulu.",
+        Phase::Ready | Phase::CloudIdle if note == "Tidak ada ucapan terdeteksi." => {
+            "Tidak ada ucapan terdeteksi. Coba dikte lagi."
+        }
+        _ => return None,
+    };
+    Some(message(text, english))
+}
+
+fn dictation_feedback(ui: &mut Ui, phase: Phase, level: f32, notice: Option<&str>) {
+    // Slot ini mencakup meter 4 pt dan ruang 18 pt di kedua sisinya.
+    let (slot, response) =
+        ui.allocate_exact_size(vec2(ui.available_width(), 40.0), egui::Sense::hover());
+    if let Some(text) = notice {
+        let mut job = egui::text::LayoutJob::simple(
+            text.to_owned(),
+            egui::FontId::proportional(13.0),
+            WARN,
+            slot.width(),
+        );
+        job.wrap.max_rows = 2;
+        let galley = ui.painter().layout_job(job);
+        let pos = egui::pos2(slot.left(), slot.center().y - galley.size().y * 0.5);
+        let elided = galley.elided;
+        ui.painter().with_clip_rect(slot).galley(pos, galley, WARN);
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, text));
+        if elided {
+            response.on_hover_text(text);
+        }
+        return;
+    }
+    let rect = egui::Rect::from_center_size(slot.center(), vec2(slot.width(), 4.0));
+    let busy = matches!(
+        phase,
+        Phase::Loading | Phase::Starting | Phase::Transcribing
+    );
     let fraction = meter_fraction(level);
     response.widget_info(|| {
         let mut info = egui::WidgetInfo::new(egui::Role::Meter);
@@ -1737,10 +1770,13 @@ fn meter(ui: &mut Ui, active: bool, busy: bool, level: f32) {
     } else {
         egui::Rect::from_min_size(rect.min, vec2(rect.width() * fraction, rect.height()))
     };
-    if busy || (active && fraction > 0.0) {
+    if busy || (phase == Phase::Recording && fraction > 0.0) {
         ui.painter().rect_filled(fill, 3.0, ACCENT);
     }
 }
+
+#[cfg(test)]
+mod dictation_feedback_tests;
 
 #[cfg(test)]
 mod meter_tests {
@@ -1967,7 +2003,16 @@ fn message(text: &str, english: bool) -> String {
         return text.to_owned();
     }
     let mut text = text.to_owned();
-    for (id, en) in [
+    for &(id, en) in ui_messages() {
+        if text.contains(id) {
+            text = text.replace(id, en);
+        }
+    }
+    text
+}
+
+fn ui_messages() -> &'static [(&'static str, &'static str)] {
+    &[
         (
             "Tidak ada jendela tujuan; hasil hanya tampil di sini.",
             "No target window; results appear only here.",
@@ -2087,8 +2132,237 @@ fn message(text: &str, english: bool) -> String {
             "Could not save configuration:",
         ),
         ("Belum diinisialisasi", "Not initialized"),
-    ] {
-        text = text.replace(id, en);
-    }
-    text
+        (
+            "Periksa Project ID Google Cloud di Pengaturan.",
+            "Check your Google Cloud Project ID in Settings.",
+        ),
+        ("Dikte gagal. Coba lagi.", "Dictation failed. Try again."),
+        ("Coba dikte lagi.", "Try dictating again."),
+        (
+            "Stream berakhir sebelum rekaman selesai.",
+            "The stream ended before recording finished.",
+        ),
+        (
+            "Mesin lokal melewati batas waktu. Tunggu mesin berhenti atau mulai ulang aplikasi.",
+            "The local engine timed out. Wait for it to stop or restart the app.",
+        ),
+        (
+            "Mesin lokal sudah berhenti.",
+            "The local engine has stopped.",
+        ),
+        ("Mesin ASR berhenti", "The ASR engine stopped"),
+        (
+            "Muat ulang model di Pengaturan.",
+            "Reload the model in Settings.",
+        ),
+        ("Model belum dimuat.", "The model has not been loaded."),
+        ("Path model tidak valid:", "Invalid model path:"),
+        (
+            "File model VAD tidak ditemukan:",
+            "VAD model file not found:",
+        ),
+        (
+            "File model ASR tidak ditemukan:",
+            "ASR model file not found:",
+        ),
+        (
+            "Cloud tidak memakai loader lokal.",
+            "Cloud engines cannot load local models.",
+        ),
+        ("Model VAD gagal dimuat", "Could not load the VAD model"),
+        (
+            "Gunakan model Silero GGML untuk whisper.cpp.",
+            "Use a Silero GGML model for whisper.cpp.",
+        ),
+        ("Model ASR gagal dimuat", "Could not load the ASR model"),
+        (
+            "Pastikan file GGML whisper.cpp yang benar.",
+            "Check the whisper.cpp GGML file.",
+        ),
+        ("State ASR gagal dibuat", "Could not initialize ASR"),
+        (
+            "memori GPU/RAM mungkin tidak cukup.",
+            "GPU or system memory may be insufficient.",
+        ),
+        (
+            "Folder model Qwen3-ASR tidak ditemukan:",
+            "Qwen3-ASR model folder not found:",
+        ),
+        (
+            "Folder Qwen3-ASR tidak lengkap:",
+            "Incomplete Qwen3-ASR folder:",
+        ),
+        (
+            "Model Qwen3-ASR gagal dimuat",
+            "Could not load the Qwen3-ASR model",
+        ),
+        ("VAD gagal:", "Voice detection failed:"),
+        ("Transkripsi gagal:", "Transcription failed:"),
+        (
+            "Thread audio gagal dibuat:",
+            "Could not start the audio thread:",
+        ),
+        (
+            "Mikrofon tidak merespons saat dibuka.",
+            "The microphone did not respond.",
+        ),
+        (
+            "Mikrofon tidak mengirim ekor rekaman tepat waktu; audio dibuang.",
+            "The microphone timed out at the end of recording. Audio discarded.",
+        ),
+        (
+            "Mikrofon berhenti mengirim audio; rekaman dibatalkan.",
+            "The microphone stopped sending audio. Recording cancelled.",
+        ),
+        (
+            "Timestamp mikrofon tidak valid; rekaman dibatalkan.",
+            "Invalid microphone timestamp. Recording cancelled.",
+        ),
+        (
+            "Buffer audio penuh; rekaman dihentikan agar tidak ada audio yang hilang diam-diam.",
+            "The audio buffer filled up. Recording stopped to prevent audio loss.",
+        ),
+        (
+            "Mikrofon pilihan tidak ditemukan. Pilih ulang di Pengaturan.",
+            "Microphone not found. Select it again in Settings.",
+        ),
+        (
+            "Tidak ada mikrofon default di sistem.",
+            "No default microphone. Select an input in Settings.",
+        ),
+        (
+            "Konfigurasi mikrofon tidak dapat dibaca",
+            "Could not read the microphone configuration",
+        ),
+        (
+            "Mikrofon melaporkan 0 channel.",
+            "The microphone reported zero channels.",
+        ),
+        (
+            "Format sampel mikrofon tidak didukung:",
+            "Unsupported microphone sample format:",
+        ),
+        (
+            "Mikrofon tidak dapat dimulai",
+            "Could not start the microphone",
+        ),
+        (
+            "Stream mikrofon gagal dibuat",
+            "Could not open the microphone stream",
+        ),
+        ("Mikrofon bermasalah", "Microphone error"),
+        (
+            "Akses mikrofon ditolak. Izinkan aplikasi desktop memakai mikrofon di Pengaturan Privasi Windows.",
+            "Microphone access denied. Allow desktop apps in Windows privacy settings.",
+        ),
+        (
+            "Mikrofon tidak tersedia atau terlepas. Pilih ulang di Pengaturan.",
+            "Microphone unavailable or disconnected. Select it again in Settings.",
+        ),
+        ("Resampler gagal dibuat:", "Could not create the resampler:"),
+        (
+            "Buffer resampling tidak valid:",
+            "Invalid resampling buffer:",
+        ),
+        ("Resampling gagal:", "Audio resampling failed:"),
+        (
+            "Resampler streaming gagal dibuat.",
+            "Could not create the streaming resampler.",
+        ),
+        ("Buffer PCM tidak valid.", "Invalid PCM buffer."),
+        ("Resampling streaming gagal.", "Stream resampling failed."),
+        (
+            "Buffer cloud penuh atau koneksi terputus; rekaman dihentikan.",
+            "Cloud buffer full or connection lost. Recording stopped.",
+        ),
+        ("Sesi cloud dibatalkan.", "Cloud session cancelled."),
+        ("Batas waktu cloud terlampaui.", "Cloud session timed out."),
+        (
+            "Runtime cloud gagal dibuat.",
+            "Could not start the cloud runtime.",
+        ),
+        (
+            "Thread cloud gagal dibuat; reservasi penggunaan tetap dihitung.",
+            "Could not start the cloud thread. Reserved usage still counts.",
+        ),
+        ("Lokasi ADC tidak tersedia.", "ADC location unavailable."),
+        ("Pembacaan ADC gagal.", "Could not read ADC."),
+        ("File ADC tidak valid.", "Invalid ADC file."),
+        (
+            "Gunakan ADC pengguna dari gcloud auth application-default login.",
+            "Run gcloud auth application-default login to set up user ADC.",
+        ),
+        ("ADC tidak lengkap.", "Incomplete ADC credentials."),
+        (
+            "TLS autentikasi gagal dibuat.",
+            "Could not initialize TLS for authentication.",
+        ),
+        (
+            "Tidak dapat menghubungi Google untuk autentikasi.",
+            "Could not reach Google for authentication.",
+        ),
+        (
+            "Respons autentikasi tidak valid.",
+            "Invalid authentication response.",
+        ),
+        ("Token ADC tidak tersedia.", "ADC token unavailable."),
+        ("Endpoint tidak valid.", "Invalid endpoint."),
+        ("TLS cloud gagal dibuat.", "Could not initialize cloud TLS."),
+        ("Stream cloud tertutup.", "The cloud stream closed."),
+        ("Token tidak valid.", "Invalid token."),
+        ("Project ID tidak valid.", "Invalid project ID."),
+        ("Recognizer tidak valid.", "Invalid recognizer."),
+        (
+            "Pengiriman audio terputus.",
+            "Audio transmission interrupted.",
+        ),
+        (
+            "Hasil final cloud melewati batas waktu.",
+            "Timed out waiting for the final cloud result.",
+        ),
+        (
+            "Stream cloud berhenti sebelum rekaman selesai.",
+            "The cloud stream closed before recording finished.",
+        ),
+        (
+            "Login diperlukan. Perbarui ADC.",
+            "Sign in again to refresh ADC.",
+        ),
+        (
+            "Periksa izin Speech Client, API, dan billing project.",
+            "Check Speech Client permissions, API access, and project billing.",
+        ),
+        (
+            "Kuota atau kapasitas Google Cloud habis.",
+            "Google Cloud quota or capacity exhausted.",
+        ),
+        (
+            "Konfigurasi audio, region, atau model ditolak Google.",
+            "Google rejected the audio, region, or model configuration.",
+        ),
+        (
+            "Batas waktu Google Cloud terlampaui.",
+            "Google Cloud request timed out.",
+        ),
+        (
+            "Transkripsi cloud gagal. Periksa koneksi dan konfigurasi project.",
+            "Cloud transcription failed. Check your connection and project settings.",
+        ),
+        (
+            "Lokasi penggunaan tidak tersedia.",
+            "Usage counter location unavailable.",
+        ),
+        (
+            "Penghitung penggunaan rusak; cloud diblokir.",
+            "Usage counter corrupted. Cloud dictation blocked.",
+        ),
+        (
+            "Penghitung penggunaan tidak dapat dibaca.",
+            "Could not read the usage counter.",
+        ),
+        (
+            "Penghitung penggunaan gagal disimpan; cloud diblokir.",
+            "Could not save the usage counter. Cloud dictation blocked.",
+        ),
+    ]
 }
