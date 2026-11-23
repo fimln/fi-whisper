@@ -2,8 +2,9 @@ use super::*;
 
 #[test]
 fn notice_follows_session_state() {
-    let error = "Project ID Google Cloud tidak valid.";
-    let silence = "Tidak ada ucapan terdeteksi.";
+    let invalid_project = cloud::validate(&config::GoogleConfig::default()).unwrap_err();
+    let error = invalid_project.as_str();
+    let silence = controller::NO_SPEECH_NOTICE;
     for english in [false, true] {
         assert_eq!(
             dictation_notice(Phase::Error, error, silence, english).unwrap(),
@@ -14,7 +15,14 @@ fn notice_follows_session_state() {
             }
         );
         for phase in [Phase::Ready, Phase::CloudIdle] {
-            assert!(dictation_notice(phase, error, silence, english).is_some());
+            assert_eq!(
+                dictation_notice(phase, error, silence, english).as_deref(),
+                Some(if english {
+                    "No speech detected. Try dictating again."
+                } else {
+                    silence
+                })
+            );
             assert!(dictation_notice(phase, error, "", english).is_none());
         }
         assert!(dictation_notice(Phase::MissingModel, "", "", english).is_some());
@@ -58,7 +66,6 @@ fn error_text_stays_inside_the_original_meter_space() {
             .into(),
         "State ASR gagal dibuat (allocation failed); memori GPU/RAM mungkin tidak cukup.".into(),
         "Model Qwen3-ASR gagal dimuat (tensor shape mismatch).".into(),
-        "Tidak ada ucapan terdeteksi. Coba dikte lagi.".into(),
         "Folder Qwen3-ASR tidak lengkap: Shard model-00002 tidak ditemukan (models/qwen).".into(),
         format!("File model ASR tidak ditemukan: {}", "模型🦀".repeat(128)),
         format!(

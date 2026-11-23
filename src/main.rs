@@ -1710,17 +1710,10 @@ fn flash_amount(ui: &Ui, started: Option<std::time::Instant>, duration: f32) -> 
 
 fn dictation_notice(phase: Phase, error: &str, note: &str, english: bool) -> Option<String> {
     let text = match phase {
-        Phase::Error => match error {
-            "Project ID Google Cloud tidak valid." => {
-                "Periksa Project ID Google Cloud di Pengaturan."
-            }
-            "" => "Dikte gagal. Coba lagi.",
-            detail => detail,
-        },
+        Phase::Error if error.is_empty() => "Dikte gagal. Coba lagi.",
+        Phase::Error => error,
         Phase::MissingModel => "Muat model ASR dan VAD di Pengaturan terlebih dahulu.",
-        Phase::Ready | Phase::CloudIdle if note == "Tidak ada ucapan terdeteksi." => {
-            "Tidak ada ucapan terdeteksi. Coba dikte lagi."
-        }
+        Phase::Ready | Phase::CloudIdle if note == controller::NO_SPEECH_NOTICE => note,
         _ => return None,
     };
     Some(message(text, english))
@@ -2022,7 +2015,10 @@ fn ui_messages() -> &'static [(&'static str, &'static str)] {
             "Release the shortcut before changing it.",
         ),
         ("Memasukkan teks…", "Inserting text…"),
-        ("Tidak ada ucapan terdeteksi.", "No speech detected."),
+        (
+            controller::NO_SPEECH_NOTICE,
+            "No speech detected. Try dictating again.",
+        ),
         (
             "Rekaman dibatalkan; audio dibuang.",
             "Recording cancelled; audio discarded.",
@@ -2057,10 +2053,6 @@ fn ui_messages() -> &'static [(&'static str, &'static str)] {
             "Result ready, not inserted automatically:",
         ),
         ("Salin manual.", "Copy manually."),
-        (
-            "Project ID Google Cloud tidak valid.",
-            "Invalid Google Cloud Project ID.",
-        ),
         (
             "Region Chirp 3 harus us atau eu.",
             "Chirp 3 region must be us or eu.",
@@ -2133,11 +2125,10 @@ fn ui_messages() -> &'static [(&'static str, &'static str)] {
         ),
         ("Belum diinisialisasi", "Not initialized"),
         (
-            "Periksa Project ID Google Cloud di Pengaturan.",
+            cloud::INVALID_PROJECT_ID,
             "Check your Google Cloud Project ID in Settings.",
         ),
         ("Dikte gagal. Coba lagi.", "Dictation failed. Try again."),
-        ("Coba dikte lagi.", "Try dictating again."),
         (
             "Stream berakhir sebelum rekaman selesai.",
             "The stream ended before recording finished.",

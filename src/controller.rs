@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub(crate) const NO_SPEECH_NOTICE: &str = "Tidak ada ucapan terdeteksi. Coba dikte lagi.";
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Phase {
     MissingModel,
@@ -749,7 +751,7 @@ impl Controller {
                         }
                     }
                     Outcome::NoSpeech => {
-                        st.note = "Tidak ada ucapan terdeteksi.".into();
+                        st.note = NO_SPEECH_NOTICE.into();
                     }
                     Outcome::Cancelled => st.note = "Proses dibatalkan.".into(),
                     Outcome::Failed(e) => {

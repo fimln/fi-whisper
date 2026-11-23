@@ -13,6 +13,7 @@ use tokio::sync::{mpsc, watch};
 use tokio_stream::wrappers::ReceiverStream;
 
 pub const DEEPSEEK_USAGE_KEY: &str = "deepseek:api";
+pub(crate) const INVALID_PROJECT_ID: &str = "Periksa Project ID Google Cloud di Pengaturan.";
 const AUDIO_BUFFER_CHUNKS: usize = 200;
 const BOUNDARY: &str = "----fiwhisperdeepseekasr9f8e7d6c";
 static TOKEN_CACHE: Mutex<Option<CachedToken>> = Mutex::new(None);
@@ -121,7 +122,7 @@ pub fn validate(c: &GoogleConfig) -> Result<(), String> {
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
     {
-        return Err("Project ID Google Cloud tidak valid.".into());
+        return Err(INVALID_PROJECT_ID.into());
     }
     if !matches!(c.region.as_str(), "us" | "eu") {
         return Err("Region Chirp 3 harus us atau eu.".into());
