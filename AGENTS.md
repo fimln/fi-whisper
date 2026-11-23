@@ -15,6 +15,7 @@ Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR s
 - `src/transcribe.rs`: worker model (VAD, Whisper, Qwen3-ASR), abort per sesi, uji fixture `#[ignore]`.
 - `src/cloud.rs`: ADC `authorized_user`, unggahan WAV DeepSeek, streaming gRPC Chirp 3 (region `us`/`eu`), cancellation, batas penggunaan bulanan UTC.
 - `src/audio.rs`: CPAL + rtrb + rubato ke 16 kHz mono, batas 120 detik; cloud memakai resampling inkremental dan buffer terbatas tanpa membuang audio diam-diam.
+- `src/focus/`: generator white, pink, dan brown noise dari fi-focus, serta kontrol media Windows (SMTC) pada HWND utama. Generator mengadaptasi `5mdt_noise/noise` (MIT, lihat `assets/LICENSE-5mdt.txt`) dan memakai koefisien Paul Kellet untuk pink noise.
 - `src/windows.rs`: single instance, hotkey, tray, foreground, SendInput Unicode, clipboard tanpa History.
 - `src/config.rs`: `Engine`, `Language`, `GoogleConfig`, `DeepSeekConfig`, config JSON atomik di `%LOCALAPPDATA%\fi-whisper\config.json`. Field lama `google.enabled` diabaikan.
 - `src/theme.rs`: palet, font, logo, ikon, helper tampilan.
@@ -34,6 +35,8 @@ Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR s
 - Streaming Google mengikuti jadwal durasi audio yang tetap agar keterlambatan timer tidak terakumulasi. Buffer penuh, koneksi gagal, atau pembatalan harus menghentikan sesi tanpa menyisipkan hasil parsial/gagal. Hasil final tetap melalui pemeriksaan sesi dan jendela tujuan yang sama dengan mesin lokal.
 
 ## UI
+- Centang `Aktifkan fi-focus` di Pengaturan menyimpan `focus_enabled` (default mati). Jika aktif, startup menyiapkan sesi media dalam keadaan berhenti. Memilih jenis audio langsung memutarnya. Putar melanjutkan pilihan terakhir dalam sesi, sedangkan Berikutnya/Sebelumnya mengganti jenis audio secara siklik.
+- Pemutaran mengikuti proses dan tray fi-whisper. Worker fi-focus memiliki stream output WASAPI shared sendiri. Dikte tetap memakai stream input mikrofon yang dipilih, termasuk saat noise diputar, diganti, atau dijeda. Saat memverifikasi perubahan, uji rekam dan putar bersamaan serta kontrol media saat jendela tersembunyi.
 - Palet amber di `theme.rs`. Teks di atas amber selalu `ON_ACCENT` (gelap), tidak pernah putih.
 - Tanpa dot status, hint mesin, atau tagline. Sediakan teks singkat dalam bahasa Indonesia dan Inggris sesuai pengaturan bahasa.
 - Header Chirp 3 saat idle: badge `Chirp 3`, lalu status `Siap` dengan warna siap biasa. Kartu Model langsung menampilkan pengaturan project, tanpa logo Google Cloud atau teks pemeriksaan ADC; bantuan tetap di `Setup ADC`.
@@ -47,6 +50,7 @@ Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR s
 ./scripts/build-cuda.ps1 build --locked --release          # selalu memakai fitur cuda,qwen-cuda
 ./scripts/build-cuda.ps1 clippy --locked --all-targets '--' -D warnings
 ./scripts/build-cuda.ps1 test --locked --release
+./scripts/build-cuda.ps1 test --locked --release recording_completes_while_noise_is_playing '--' --ignored
 ./scripts/build-cuda.ps1 test --locked --release '--' --ignored fixture --nocapture --test-threads=1
 # Opt-in tes cloud berbayar dengan ADC; jalankan terpisah dan serial:
 $env:FI_WHISPER_TEST_PROJECT = 'PROJECT_ID'
@@ -57,6 +61,7 @@ Peringatan `vswhere.exe` dan LNK4098 (LIBCMT) sudah ada sejak awal dan tidak per
 
 ## Verifikasi
 - Setelah mengubah kode: `cargo fmt`, clippy, unit test. Kalau menyentuh worker atau model, jalankan juga uji fixture.
+- Tes unit fi-focus memeriksa level dan karakter frekuensi tiap jenis noise, fade 20 ms, urutan pemutaran, pelepasan output saat jeda, dan galat yang datang dari stream lama. Tes rekam sambil memutar noise memakai mikrofon dan perangkat output Windows.
 - Perubahan transport/audio cloud perlu tes fixture cloud, hening, pembatalan, batas penggunaan, dan streaming 120 detik. Tes ini memakai kuota Google dan diabaikan secara default; jangan memasukkannya ke tes lokal/CI tanpa opt-in. Jangan simpan transkrip ke disk; laporkan metrik/status saja.
 - Klaim GPU butuh bukti dari log backend (`GPU CUDA0`) atau nvidia-smi. Flag konfigurasi saja tidak cukup.
 - Sebutkan apa yang diamati langsung dan apa yang belum diuji (mis. injection ke aplikasi tertentu).

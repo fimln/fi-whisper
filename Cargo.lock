@@ -1628,6 +1628,7 @@ dependencies = [
  "tonic",
  "tray-icon",
  "whisper-rs",
+ "windows",
  "windows-sys 0.61.2",
 ]
 

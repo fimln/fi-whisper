@@ -4,6 +4,7 @@ mod audio;
 mod cloud;
 mod config;
 mod controller;
+mod focus;
 mod theme;
 mod transcribe;
 mod windows;
@@ -29,6 +30,8 @@ struct Window {
 
 struct App {
     core: Handle,
+    focus: Option<focus::Focus>,
+    focus_error: String,
     cloud_usage: Option<(std::time::Instant, String, Result<u64, String>)>,
     settings_open: bool,
     settings_position: Option<egui::Pos2>,
@@ -139,6 +142,8 @@ impl App {
                 })
             },
             core,
+            focus: None,
+            focus_error: String::new(),
             cloud_usage: None,
             settings_open: false,
             settings_position: None,
@@ -206,6 +211,7 @@ impl App {
             app.refresh_models();
         }
         app.push_settings();
+        app.configure_focus(&cc.egui_ctx);
         if app.engine.is_cloud() {
             app.activate_cloud();
         } else if let (Some(asr), Some(vad)) = (app.selected_asr(), app.vad.clone()) {
@@ -802,6 +808,7 @@ impl App {
         let t = |id, en| if english { en } else { id };
         let idle = !self.core.status().phase.busy();
         title(ui, t("Pengaturan", "Settings"));
+        self.focus_settings(ui);
         let width = ui.available_width();
         let mut changed = false;
         ui.add_enabled_ui(idle, |ui| {
@@ -902,27 +909,13 @@ impl App {
             });
         });
         ui.add_enabled_ui(idle, |ui| {
-            ui.spacing_mut().interact_size.y = 22.0;
-            ui.spacing_mut().icon_width = 16.0;
-            ui.spacing_mut().icon_spacing = 8.0;
-            let label = t("Tahan shortcut untuk bicara", "Hold shortcut to talk");
-            let response = ui.checkbox(&mut self.config.hold_to_talk, label);
-            changed |= response.changed();
-            let rect = egui::Rect::from_center_size(
-                egui::pos2(response.rect.left() + 8.0, response.rect.center().y),
-                vec2(16.0, 16.0),
-            );
-            ui.painter().rect(
-                rect,
-                4.0,
-                INPUT,
-                egui::Stroke::new(1.0, MUTED),
-                egui::StrokeKind::Inside,
-            );
-            if self.config.hold_to_talk {
-                egui::Image::new((self.icons.check.id(), vec2(12.0, 12.0)))
-                    .paint_at(ui, rect.shrink(2.0));
-            }
+            changed |= settings_checkbox(
+                ui,
+                &self.icons.check,
+                &mut self.config.hold_to_talk,
+                t("Tahan shortcut untuk bicara", "Hold shortcut to talk"),
+            )
+            .changed();
         });
         if !self.mic_error.is_empty() {
             ui.label(
@@ -1000,6 +993,140 @@ impl App {
                     .small()
                     .color(WARN),
             );
+        }
+    }
+
+    fn configure_focus(&mut self, ctx: &egui::Context) {
+        self.focus = None;
+        self.focus_error.clear();
+        if self.config.focus_enabled {
+            let ctx = ctx.clone();
+            match focus::Focus::new(self.window.hwnd.load(Ordering::SeqCst), move || {
+                ctx.request_repaint_of(settings_id());
+                ctx.request_repaint_of(egui::ViewportId::ROOT);
+            }) {
+                Ok(focus) => self.focus = Some(focus),
+                Err(error) => self.focus_error = error.to_string(),
+            }
+        }
+    }
+
+    fn focus_settings(&mut self, ui: &mut Ui) {
+        let english = self.config.language == Language::English;
+        let t = |id, en| if english { en } else { id };
+        if settings_checkbox(
+            ui,
+            &self.icons.check,
+            &mut self.config.focus_enabled,
+            t("Aktifkan fi-focus", "Enable fi-focus"),
+        )
+        .changed()
+        {
+            self.configure_focus(ui.ctx());
+            self.save_config();
+        }
+        if let Some(focus) = &self.focus {
+            let status = focus.status();
+            let playing = status.playback == focus::Playback::Playing;
+            field_label(ui, t("Jenis audio", "Audio type"));
+            ui.horizontal(|ui| {
+                combo(
+                    ui,
+                    egui::ComboBox::from_id_salt("focus-noise")
+                        .width(ui.available_width() - 84.0)
+                        .selected_text(status.noise.label()),
+                    &self.icons.chevron,
+                    |ui| {
+                        for noise in focus::Noise::ALL {
+                            if ui
+                                .selectable_label(status.noise == noise, noise.label())
+                                .clicked()
+                            {
+                                focus.send(focus::Command::Select(noise));
+                            }
+                        }
+                    },
+                );
+                if action_button(
+                    ui,
+                    true,
+                    false,
+                    ui.available_width(),
+                    if playing {
+                        t("Jeda", "Pause")
+                    } else {
+                        t("Putar", "Play")
+                    },
+                )
+                .clicked()
+                {
+                    focus.send(if playing {
+                        focus::Command::Pause
+                    } else {
+                        focus::Command::Play
+                    });
+                }
+            });
+            let label = if playing {
+                format!(
+                    "{} · {}",
+                    t("Sedang diputar", "Now playing"),
+                    status.noise.label()
+                )
+            } else if status.playback == focus::Playback::Paused {
+                t("Dijeda", "Paused").into()
+            } else {
+                t("Tidak ada pemutaran", "Nothing playing").into()
+            };
+            ui.label(RichText::new(label).small().color(MUTED));
+            let audio_error = status.audio_error.map(|error| {
+                use focus::OutputError::*;
+                match error {
+                    NoDevice => t(
+                        "Tidak ada perangkat keluaran audio",
+                        "No audio output device",
+                    )
+                    .into(),
+                    Configuration => t(
+                        "Gagal membaca konfigurasi perangkat",
+                        "Could not read device configuration",
+                    )
+                    .into(),
+                    UnsupportedFormat(format) => format!(
+                        "{} ({format})",
+                        t("Format audio tidak didukung", "Unsupported output format")
+                    ),
+                    Open => t(
+                        "Gagal membuka perangkat audio",
+                        "Could not open audio device",
+                    )
+                    .into(),
+                    Play => t("Gagal memulai pemutaran", "Could not start playback").into(),
+                    Unavailable => t(
+                        "Perangkat audio tidak tersedia",
+                        "Audio output device unavailable",
+                    )
+                    .into(),
+                }
+            });
+            for (label, error) in [
+                (t("Keluaran audio", "Audio output"), audio_error),
+                (
+                    t("Kontrol media Windows", "Windows media controls"),
+                    status.media_error,
+                ),
+            ] {
+                if let Some(error) = error {
+                    ui.label(
+                        RichText::new(format!("{label}: {error}"))
+                            .small()
+                            .color(WARN),
+                    );
+                }
+            }
+        }
+        if !self.focus_error.is_empty() {
+            ui.label(RichText::new(&self.focus_error).small().color(WARN));
         }
     }
 
@@ -1385,6 +1512,7 @@ impl App {
             .clicked()
             {
                 self.config = Config::default();
+                self.configure_focus(ui.ctx());
                 self.engine = self.config.engine;
                 self.config_error.clear();
                 self.save_config();
@@ -1462,6 +1590,38 @@ impl App {
             ui.ctx().request_repaint();
         }
     }
+}
+
+fn settings_checkbox(
+    ui: &mut Ui,
+    check: &egui::TextureHandle,
+    checked: &mut bool,
+    label: &str,
+) -> egui::Response {
+    ui.scope(|ui| {
+        ui.spacing_mut().interact_size.y = 22.0;
+        ui.spacing_mut().icon_width = 16.0;
+        ui.spacing_mut().icon_spacing = 8.0;
+
+        let response = ui.checkbox(checked, label);
+
+        let rect = egui::Rect::from_center_size(
+            egui::pos2(response.rect.left() + 8.0, response.rect.center().y),
+            vec2(16.0, 16.0),
+        );
+        ui.painter().rect(
+            rect,
+            4.0,
+            INPUT,
+            egui::Stroke::new(1.0, MUTED),
+            egui::StrokeKind::Inside,
+        );
+        if *checked {
+            egui::Image::new((check.id(), vec2(12.0, 12.0))).paint_at(ui, rect.shrink(2.0));
+        }
+        response
+    })
+    .inner
 }
 
 fn settings_id() -> egui::ViewportId {
