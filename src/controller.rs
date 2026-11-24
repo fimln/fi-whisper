@@ -12,6 +12,8 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
+pub(crate) const MISSING_MODEL_NOTICE: &str =
+    "Muat model ASR dan VAD di Pengaturan terlebih dahulu.";
 pub(crate) const NO_SPEECH_NOTICE: &str = "Tidak ada ucapan terdeteksi. Coba dikte lagi.";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,7 +427,7 @@ impl Controller {
                 self.st().note = "Sedang sibuk; shortcut diabaikan sampai selesai.".into();
             }
             _ => {
-                self.st().note = "Muat model ASR dan VAD di Pengaturan terlebih dahulu.".into();
+                self.st().note = MISSING_MODEL_NOTICE.into();
             }
         }
     }

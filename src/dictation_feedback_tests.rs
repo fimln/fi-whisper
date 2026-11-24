@@ -25,7 +25,14 @@ fn notice_follows_session_state() {
             );
             assert!(dictation_notice(phase, error, "", english).is_none());
         }
-        assert!(dictation_notice(Phase::MissingModel, "", "", english).is_some());
+        assert_eq!(
+            dictation_notice(Phase::MissingModel, "", "", english).as_deref(),
+            Some(if english {
+                "Load ASR and VAD models in Settings first."
+            } else {
+                controller::MISSING_MODEL_NOTICE
+            })
+        );
         for phase in [
             Phase::Loading,
             Phase::Starting,

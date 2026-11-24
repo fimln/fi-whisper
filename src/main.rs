@@ -1712,7 +1712,7 @@ fn dictation_notice(phase: Phase, error: &str, note: &str, english: bool) -> Opt
     let text = match phase {
         Phase::Error if error.is_empty() => "Dikte gagal. Coba lagi.",
         Phase::Error => error,
-        Phase::MissingModel => "Muat model ASR dan VAD di Pengaturan terlebih dahulu.",
+        Phase::MissingModel => controller::MISSING_MODEL_NOTICE,
         Phase::Ready | Phase::CloudIdle if note == controller::NO_SPEECH_NOTICE => note,
         _ => return None,
     };
@@ -1997,9 +1997,7 @@ fn message(text: &str, english: bool) -> String {
     }
     let mut text = text.to_owned();
     for &(id, en) in ui_messages() {
-        if text.contains(id) {
-            text = text.replace(id, en);
-        }
+        text = text.replace(id, en);
     }
     text
 }
@@ -2041,7 +2039,7 @@ fn ui_messages() -> &'static [(&'static str, &'static str)] {
             "Busy; shortcut ignored until finished.",
         ),
         (
-            "Muat model ASR dan VAD di Pengaturan terlebih dahulu.",
+            controller::MISSING_MODEL_NOTICE,
             "Load ASR and VAD models in Settings first.",
         ),
         (
