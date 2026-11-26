@@ -734,9 +734,14 @@ impl App {
             }
             if status.is_some() || timing.is_some() {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    const LABEL_SIZE: f32 = 10.0;
                     let text_width = |ui: &Ui, s: &str, color| {
                         ui.painter()
-                            .layout_no_wrap(s.to_owned(), egui::FontId::proportional(10.0), color)
+                            .layout_no_wrap(
+                                s.to_owned(),
+                                egui::FontId::proportional(LABEL_SIZE),
+                                color,
+                            )
                             .size()
                             .x
                     };
@@ -766,7 +771,7 @@ impl App {
                             (avail >= text_width(ui, &short, SECONDARY)).then_some(short)
                         };
                         if let Some(label) = label {
-                            ui.label(RichText::new(label).size(10.0).color(SECONDARY))
+                            ui.label(RichText::new(label).size(LABEL_SIZE).color(SECONDARY))
                                 .on_hover_text(format!(
                                     "VAD {:.2} s, ASR {:.2} s",
                                     tm.vad.as_secs_f32(),
@@ -777,7 +782,7 @@ impl App {
                     if let Some(text) = status
                         && ui.available_width() >= text_width(ui, text, SUCCESS)
                     {
-                        ui.label(RichText::new(text).small().color(SUCCESS));
+                        ui.label(RichText::new(text).size(LABEL_SIZE).color(SUCCESS));
                     }
                 });
             }
