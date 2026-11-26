@@ -389,7 +389,7 @@ impl App {
                                 if settings {
                                     self.row(ui, 1, Self::input_card, Self::model_card);
                                 } else {
-                                    self.row(ui, 0, Self::dictation_card, Self::result_card);
+                                    self.main_row(ui);
                                 }
                             });
                     })
@@ -473,16 +473,11 @@ impl App {
                     REPO_URL,
                 );
                 let color = phase_color(phase);
-                let id = ui.scope_id().with("phase_color");
-                let components = color.to_array();
-                let animated = std::array::from_fn::<_, 4, _>(|i| {
-                    ui.ctx()
-                        .animate_value_with_time(id.with(i), components[i] as f32, 0.15)
-                });
-                let background = egui::Color32::from_rgb(
-                    animated[0] as u8,
-                    animated[1] as u8,
-                    animated[2] as u8,
+                let animated_status = animate_color(
+                    ui.ctx(),
+                    ui.scope_id().with("phase_color"),
+                    color,
+                    STATE_ANIM,
                 );
                 let engine = loaded.unwrap_or(self.engine);
                 let (model, tint) = if cpu && !engine.is_cloud() {
@@ -490,6 +485,8 @@ impl App {
                 } else {
                     (engine.short().to_owned(), SECONDARY)
                 };
+                let animated_tint =
+                    animate_color(ui.ctx(), ui.scope_id().with("model_tint"), tint, STATE_ANIM);
                 // Sisakan lebar pil model sebelum menggambar status dalam layout kanan-ke-kiri.
                 let model_width = ui
                     .painter()
@@ -503,14 +500,19 @@ impl App {
                         .max(0.0);
                 ui.scope(|ui| {
                     ui.set_max_width(status_width);
-                    status_badge(ui, phase_label(phase, english), color, background);
+                    status_badge(
+                        ui,
+                        phase_label(phase, english),
+                        animated_status,
+                        animated_status,
+                    );
                 });
-                status_badge(ui, &model, tint, tint);
+                status_badge(ui, &model, animated_tint, animated_tint);
             });
         });
     }
 
-    fn dictation_card(&mut self, ui: &mut Ui) {
+    fn dictation_card(&mut self, ui: &mut Ui, button_width: f32) {
         let english = self.config.language == Language::English;
         let t = |id, en| if english { en } else { id };
         let st = self.core.status();
@@ -531,6 +533,13 @@ impl App {
         }
         let ready = st.loaded.is_some();
         drop(st);
+
+        let rec_t = animate_bool_ease(
+            ui.ctx(),
+            egui::Id::unique("rec-active"),
+            recording,
+            STATE_ANIM,
+        );
 
         ui.horizontal(|ui| {
             title(ui, t("Dikte", "Dictation"));
@@ -558,11 +567,14 @@ impl App {
                 ))
                 .monospace()
                 .size(42.0)
-                .color(if recording { TEXT } else { SECONDARY }),
+                .color(mix(SECONDARY, TEXT, rec_t)),
             );
             ui.label(RichText::new("/ 02:00").monospace().size(14.0).color(MUTED));
-            if recording {
-                rec_indicator(ui);
+            if rec_t > 0.0 {
+                ui.scope(|ui| {
+                    ui.multiply_opacity(rec_t);
+                    rec_indicator(ui);
+                });
             }
         });
         dictation_feedback(ui, phase, self.level, notice.as_deref());
@@ -572,19 +584,18 @@ impl App {
             let done = t("Selesai", "Done");
             let processing = t("Memproses…", "Processing…");
             let loading = t("Memuat…", "Loading…");
-            let width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.0;
             let (enabled, label) = match phase {
                 Phase::Recording => (true, done),
                 Phase::Transcribing => (false, processing),
                 Phase::Loading | Phase::Starting => (false, loading),
                 _ => (ready, start),
             };
-            let fill = if recording { ACCENT_HOVER } else { ACCENT };
-            if dictation_button(ui, enabled, Some(fill), width, label).clicked() {
+            let fill = mix(ACCENT, ACCENT_HOVER, rec_t);
+            if dictation_button(ui, enabled, Some(fill), button_width, label).clicked() {
                 self.core.send(Cmd::Toggle(Source::Gui));
             }
             if !matches!(phase, Phase::Recording | Phase::Transcribing)
-                && dictation_button(ui, true, None, width, settings_label).clicked()
+                && dictation_button(ui, true, None, button_width, settings_label).clicked()
             {
                 if !self.settings_open {
                     let scale = ui.ctx().pixels_per_point();
@@ -605,7 +616,7 @@ impl App {
                     .send_viewport_cmd_to(settings_id(), egui::ViewportCommand::Focus);
             }
             if matches!(phase, Phase::Recording | Phase::Transcribing)
-                && secondary(ui, true, t("Batalkan", "Cancel")).clicked()
+                && dictation_button(ui, true, None, button_width, t("Batalkan", "Cancel")).clicked()
             {
                 self.core.send(Cmd::Cancel);
             }
@@ -956,21 +967,31 @@ impl App {
             &self.icons.chevron,
             |ui| {
                 ui.add_enabled_ui(tray, |ui| {
-                    ui.selectable_value(&mut selected, 1, t("Sembunyikan ke tray", "Hide to tray"));
+                    interactive(ui, |ui| {
+                        ui.selectable_value(
+                            &mut selected,
+                            1,
+                            t("Sembunyikan ke tray", "Hide to tray"),
+                        )
+                    });
+                    interactive(ui, |ui| {
+                        ui.selectable_value(
+                            &mut selected,
+                            2,
+                            t(
+                                "Sembunyikan ke tray, auto-startup",
+                                "Hide to tray, start with Windows",
+                            ),
+                        )
+                    });
+                });
+                interactive(ui, |ui| {
                     ui.selectable_value(
                         &mut selected,
-                        2,
-                        t(
-                            "Sembunyikan ke tray, auto-startup",
-                            "Hide to tray, start with Windows",
-                        ),
-                    );
+                        0,
+                        t("Keluar dari aplikasi", "Quit application"),
+                    )
                 });
-                ui.selectable_value(
-                    &mut selected,
-                    0,
-                    t("Keluar dari aplikasi", "Quit application"),
-                );
             },
         );
         if selected != old && self.config_error.is_empty() {
@@ -1034,9 +1055,10 @@ impl App {
                     &self.icons.chevron,
                     |ui| {
                         for noise in focus::Noise::ALL {
-                            if ui
-                                .selectable_label(status.noise == noise, noise.label())
-                                .clicked()
+                            if interactive(ui, |ui| {
+                                ui.selectable_label(status.noise == noise, noise.label())
+                            })
+                            .clicked()
                             {
                                 focus.send(focus::Command::Select(noise));
                             }
@@ -1542,6 +1564,91 @@ impl App {
         }
     }
 
+    /// Baris utama: kartu Dikte melebar penuh saat merekam/memproses, lalu kembali dua kolom saat idle.
+    fn main_row(&mut self, ui: &mut Ui) {
+        let phase = self.core.status().phase;
+        let expand = animate_bool_ease(
+            ui.ctx(),
+            egui::Id::unique("dictation-expand"),
+            dictation_expanded(phase),
+            CARD_ANIM,
+        );
+        let total_width = ui.available_width();
+        let gap = ui.spacing().item_spacing.x;
+        let layout = main_row_layout(total_width, gap, expand);
+        let previous = self.rows[0];
+        let target = previous[0].max(previous[1]).max(209.0);
+        let mut heights = previous;
+        let origin = ui.cursor().min;
+        let max_height = ui.available_height().max(target + 36.0);
+
+        let mut left_ui = ui.new_child(
+            egui::UiBuilder::new()
+                .id_salt("dictation-card")
+                .max_rect(egui::Rect::from_min_size(
+                    origin,
+                    vec2(layout.dict_width, max_height),
+                ))
+                .layout(Layout::top_down(Align::Min)),
+        );
+        let left_frame = card().show(&mut left_ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.set_min_height(target);
+            heights[0] = ui
+                .with_layout(Layout::top_down(Align::Min), |ui| {
+                    self.dictation_card(ui, layout.button_width);
+                })
+                .response
+                .rect
+                .height();
+        });
+        let mut row_height = left_frame.response.rect.height();
+
+        let right_left = origin.x + layout.right_x_offset;
+        let visible_right = (origin.x + total_width - right_left).max(0.0);
+        if layout.result_alpha > 0.0 && visible_right > 1.0 {
+            let mut right_ui = ui.new_child(
+                egui::UiBuilder::new()
+                    .id_salt("result-card")
+                    .max_rect(egui::Rect::from_min_size(
+                        egui::pos2(right_left, origin.y),
+                        vec2(layout.col_width, max_height),
+                    ))
+                    .layout(Layout::top_down(Align::Min)),
+            );
+            // Kunci lebar layout kartu hasil dan potong dengan clip_rect agar teks tidak membungkus ulang saat meluncur.
+            let clip = ui.clip_rect().intersect(egui::Rect::from_min_max(
+                egui::pos2(right_left - 1.0, ui.clip_rect().top()),
+                egui::pos2(origin.x + total_width + 1.0, ui.clip_rect().bottom()),
+            ));
+            right_ui.set_clip_rect(clip);
+            right_ui.multiply_opacity(layout.result_alpha);
+            let right_frame = card().show(&mut right_ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(target);
+                let measured = ui
+                    .with_layout(Layout::top_down(Align::Min), |ui| self.result_card(ui))
+                    .response
+                    .rect
+                    .height();
+                if expand == 0.0 {
+                    heights[1] = measured;
+                }
+            });
+            row_height = row_height.max(right_frame.response.rect.height());
+        }
+
+        ui.advance_cursor_after_rect(egui::Rect::from_min_size(
+            origin,
+            vec2(total_width, row_height),
+        ));
+        if heights != previous {
+            self.rows[0] = heights;
+            ui.ctx().request_discard("row height");
+            ui.ctx().request_repaint();
+        }
+    }
+
     /// Satu baris dua kolom; kedua kartu disamakan tingginya memakai ukuran frame sebelumnya.
     fn row(
         &mut self,
@@ -1588,6 +1695,39 @@ impl App {
     }
 }
 
+fn dictation_expanded(phase: Phase) -> bool {
+    matches!(
+        phase,
+        Phase::Starting | Phase::Recording | Phase::Transcribing
+    )
+}
+
+struct MainRowLayout {
+    col_width: f32,
+    dict_width: f32,
+    button_width: f32,
+    right_x_offset: f32,
+    result_alpha: f32,
+}
+
+fn main_row_layout(total_width: f32, gap: f32, expand: f32) -> MainRowLayout {
+    let expand = expand.clamp(0.0, 1.0);
+    let col_width = ((total_width - gap) / 2.0).max(0.0);
+    let dict_width = egui::lerp(col_width..=total_width, expand);
+    // 36 pt = margin kiri+kanan `card()` (18 pt × 2). Lebar tombol dikunci ke ukuran dua kolom
+    // agar tombol tetap kompak di kiri saat kartu melebar penuh.
+    let button_width = ((col_width - 36.0 - gap) / 2.0).max(0.0);
+    let right_x_offset = dict_width + gap;
+    let result_alpha = (1.0 - expand * 1.35).clamp(0.0, 1.0);
+    MainRowLayout {
+        col_width,
+        dict_width,
+        button_width,
+        right_x_offset,
+        result_alpha,
+    }
+}
+
 fn settings_checkbox(
     ui: &mut Ui,
     check: &egui::TextureHandle,
@@ -1600,20 +1740,44 @@ fn settings_checkbox(
         ui.spacing_mut().icon_spacing = 8.0;
 
         let response = ui.checkbox(checked, label);
+        let hover = animate_bool_ease(
+            ui.ctx(),
+            response.id.with("hover"),
+            response.enabled() && response.hovered(),
+            HOVER_ANIM,
+        );
+        let checked_t =
+            animate_bool_ease(ui.ctx(), response.id.with("checked"), *checked, STATE_ANIM);
 
         let rect = egui::Rect::from_center_size(
             egui::pos2(response.rect.left() + 8.0, response.rect.center().y),
             vec2(16.0, 16.0),
         );
+        let fill = mix(
+            mix(INPUT, RAISED, 0.45 * hover),
+            ACCENT_TINT.gamma_multiply(1.0 + 0.5 * hover),
+            checked_t,
+        );
+        let border = mix(
+            mix(MUTED, SECONDARY, hover),
+            mix(ACCENT_BORDER, ACCENT, 0.65 + 0.35 * hover),
+            checked_t,
+        );
         ui.painter().rect(
             rect,
             4.0,
-            INPUT,
-            egui::Stroke::new(1.0, MUTED),
+            fill,
+            egui::Stroke::new(1.0, border),
             egui::StrokeKind::Inside,
         );
-        if *checked {
-            egui::Image::new((check.id(), vec2(12.0, 12.0))).paint_at(ui, rect.shrink(2.0));
+        if checked_t > 0.0 {
+            let size = egui::lerp(8.0..=12.0, checked_t);
+            egui::Image::new((check.id(), vec2(size, size)))
+                .tint(ACCENT_HOVER.gamma_multiply(checked_t))
+                .paint_at(
+                    ui,
+                    egui::Rect::from_center_size(rect.center(), vec2(size, size)),
+                );
         }
         response
     })
@@ -1691,6 +1855,7 @@ fn rec_indicator(ui: &mut Ui) {
     painter.circle_filled(rect.center(), 7.0, DANGER.gamma_multiply(0.2 * pulse));
     painter.circle_filled(rect.center(), 4.0, DANGER.gamma_multiply(pulse));
     ui.label(RichText::new("REC").font(semibold(12.0)).color(DANGER));
+    ui.ctx().request_repaint();
 }
 
 fn meter_fraction(level: f32) -> f32 {
@@ -1705,10 +1870,11 @@ fn meter_fraction(level: f32) -> f32 {
 
 fn flash_amount(ui: &Ui, started: Option<std::time::Instant>, duration: f32) -> f32 {
     let value = started.map_or(0.0, |t| {
-        (1.0 - t.elapsed().as_secs_f32() / duration).clamp(0.0, 1.0)
+        let progress = (t.elapsed().as_secs_f32() / duration).clamp(0.0, 1.0);
+        1.0 - egui::emath::easing::cubic_out(progress)
     });
     if value > 0.0 {
-        ui.ctx().request_repaint_after(Duration::from_millis(33));
+        ui.ctx().request_repaint();
     }
     value
 }
@@ -1771,6 +1937,9 @@ fn dictation_feedback(ui: &mut Ui, phase: Phase, level: f32, notice: Option<&str
     if busy || (phase == Phase::Recording && fraction > 0.0) {
         ui.painter().rect_filled(fill, 3.0, ACCENT);
     }
+    if busy {
+        ui.ctx().request_repaint();
+    }
 }
 
 #[cfg(test)]
@@ -1791,6 +1960,43 @@ mod meter_tests {
         assert_eq!(meter_fraction(level(-24.0)), 1.0);
         assert_eq!(meter_fraction(level(-12.0)), 1.0);
         assert_eq!(meter_fraction(1.0), 1.0);
+    }
+
+    #[test]
+    fn dictation_card_expands_only_while_recording_or_processing() {
+        use super::{Phase, dictation_expanded, main_row_layout};
+
+        for phase in [Phase::Starting, Phase::Recording, Phase::Transcribing] {
+            assert!(dictation_expanded(phase), "{phase:?} harus melebar");
+        }
+        for phase in [
+            Phase::MissingModel,
+            Phase::CloudIdle,
+            Phase::Loading,
+            Phase::Ready,
+            Phase::Error,
+        ] {
+            assert!(!dictation_expanded(phase), "{phase:?} harus dua kolom");
+        }
+
+        let idle = main_row_layout(588.0, 8.0, 0.0);
+        let mid = main_row_layout(588.0, 8.0, 0.5);
+        let full = main_row_layout(588.0, 8.0, 1.0);
+
+        assert!((idle.col_width - 290.0).abs() < 1e-4);
+        assert!((idle.dict_width - 290.0).abs() < 1e-4);
+        assert!((idle.right_x_offset - 298.0).abs() < 1e-4);
+        assert_eq!(idle.result_alpha, 1.0);
+
+        assert!(mid.dict_width > idle.dict_width && mid.dict_width < full.dict_width);
+        assert_eq!(mid.col_width, idle.col_width);
+        assert!(mid.result_alpha > 0.0 && mid.result_alpha < 1.0);
+
+        assert!((full.dict_width - 588.0).abs() < 1e-4);
+        assert_eq!(full.result_alpha, 0.0);
+        // Lebar tombol tetap sama di semua fase pelebaran agar tidak melar saat kartu melebar.
+        assert_eq!(idle.button_width, mid.button_width);
+        assert_eq!(idle.button_width, full.button_width);
     }
 }
 

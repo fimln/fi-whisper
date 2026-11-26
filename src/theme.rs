@@ -4,24 +4,42 @@ use eframe::egui::{
 };
 use std::sync::Arc;
 
-const ANIM: f32 = 0.12;
+pub const HOVER_ANIM: f32 = 0.14;
+pub const PRESS_ANIM: f32 = 0.07;
+pub const STATE_ANIM: f32 = 0.16;
+pub const CARD_ANIM: f32 = 0.26;
 
-fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
+pub fn mix(a: Color32, b: Color32, t: f32) -> Color32 {
     egui::lerp(egui::Rgba::from(a)..=egui::Rgba::from(b), t).into()
+}
+
+pub fn animate_bool_ease(ctx: &egui::Context, id: egui::Id, value: bool, duration: f32) -> f32 {
+    ctx.animate_bool_with_time_and_easing(id, value, duration, egui::emath::easing::cubic_out)
+}
+
+/// Interpolasi warna di ruang linier Rgba agar transisi status tidak menggelap di tengah.
+pub fn animate_color(ctx: &egui::Context, id: egui::Id, target: Color32, duration: f32) -> Color32 {
+    let target = egui::Rgba::from(target).to_array();
+    let channels = std::array::from_fn::<_, 4, _>(|i| {
+        ctx.animate_value_with_time(id.with(i), target[i], duration)
+    });
+    egui::Rgba::from_rgba_premultiplied(channels[0], channels[1], channels[2], channels[3]).into()
 }
 
 fn motion(ui: &Ui, response: &Response, enabled: bool) -> (f32, f32) {
     let enabled = enabled && response.enabled();
     (
-        ui.ctx().animate_bool_with_time(
+        animate_bool_ease(
+            ui.ctx(),
             response.id.with("hover"),
             enabled && response.hovered(),
-            ANIM,
+            HOVER_ANIM,
         ),
-        ui.ctx().animate_bool_with_time(
+        animate_bool_ease(
+            ui.ctx(),
             response.id.with("press"),
             enabled && (response.is_pointer_button_down_on() || response.clicked()),
-            0.07,
+            PRESS_ANIM,
         ),
     )
 }
@@ -33,12 +51,18 @@ pub fn interactive(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Respon
         .ctx()
         .data(|d| d.get_temp::<(bool, bool)>(id))
         .unwrap_or_default();
-    let hover =
-        ui.ctx()
-            .animate_bool_with_time(id.with("hover"), previous.0 && ui.is_enabled(), ANIM);
-    let press =
-        ui.ctx()
-            .animate_bool_with_time(id.with("press"), previous.1 && ui.is_enabled(), 0.07);
+    let hover = animate_bool_ease(
+        ui.ctx(),
+        id.with("hover"),
+        previous.0 && ui.is_enabled(),
+        HOVER_ANIM,
+    );
+    let press = animate_bool_ease(
+        ui.ctx(),
+        id.with("press"),
+        previous.1 && ui.is_enabled(),
+        PRESS_ANIM,
+    );
     let response = ui
         .scope(|ui| {
             let w = &mut ui.visuals_mut().widgets;
@@ -53,7 +77,11 @@ pub fn interactive(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Respon
                 w.active.weak_bg_fill,
                 press,
             );
-            let border = mix(rest.bg_stroke.color, w.hovered.bg_stroke.color, hover);
+            let border = mix(
+                mix(rest.bg_stroke.color, w.hovered.bg_stroke.color, hover),
+                w.active.bg_stroke.color,
+                press,
+            );
             for state in [&mut w.inactive, &mut w.hovered, &mut w.active] {
                 state.bg_fill = fill;
                 state.weak_bg_fill = weak;
@@ -81,12 +109,16 @@ pub fn combo(
     add: impl FnOnce(&mut Ui),
 ) -> Response {
     let style = ui.style().clone();
+    let icon_id = ui.next_auto_id().with("combo-chevron");
     interactive(ui, |ui| {
         let chevron = chevron.id();
         combo
-            .icon(move |ui, rect, _, _| {
+            .icon(move |ui, rect, _, is_open| {
+                let open = animate_bool_ease(ui.ctx(), icon_id, is_open, STATE_ANIM);
+                let tint = mix(SECONDARY, ACCENT_HOVER, open);
                 egui::Image::new((chevron, vec2(13.0, 13.0)))
-                    .tint(SECONDARY)
+                    .tint(tint)
+                    .rotate(open * std::f32::consts::PI, vec2(0.5, 0.5))
                     .paint_at(
                         ui,
                         egui::Rect::from_center_size(rect.center(), vec2(13.0, 13.0)),
@@ -111,6 +143,7 @@ pub const INPUT: Color32 = Color32::from_gray(10);
 // Aksen
 pub const ACCENT: Color32 = Color32::from_rgb(0xF5, 0x9E, 0x0B);
 pub const ACCENT_HOVER: Color32 = Color32::from_rgb(0xFB, 0xBF, 0x24);
+pub const ACCENT_ACTIVE: Color32 = Color32::from_rgb(0xD9, 0x77, 0x06);
 /// rgba(245, 158, 11, 0.12); dipakai untuk badge, highlight, dan glow.
 pub const ACCENT_TINT: Color32 = Color32::from_rgba_unmultiplied_const(0xF5, 0x9E, 0x0B, 31);
 pub const ACCENT_BORDER: Color32 = Color32::from_rgb(0x78, 0x35, 0x0F);
@@ -220,7 +253,8 @@ fn pill(ui: &mut Ui, icon: &egui::TextureHandle, text: Option<&str>, color: Colo
         .interact(Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand);
     let (hover, press) = motion(ui, &response, true);
-    frame.frame.fill = color.gamma_multiply(0.14 + 0.10 * hover + 0.08 * press);
+    frame.frame.fill = color.gamma_multiply(0.14 + 0.14 * hover + 0.10 * press);
+    frame.frame.stroke = Stroke::new(1.0, color.gamma_multiply(0.35 * hover));
     frame.paint(ui);
     response
 }
@@ -288,6 +322,7 @@ pub fn install(ctx: &egui::Context) {
     ctx.options_mut(|options| options.sync_window_theme = false);
     ctx.set_theme(egui::Theme::Dark);
     ctx.style_mut_of(egui::Theme::Dark, |style| {
+        style.animation_time = STATE_ANIM;
         style.text_styles = [
             (TextStyle::Heading, semibold(20.0)),
             (TextStyle::Body, FontId::proportional(14.5)),
@@ -399,7 +434,7 @@ pub fn status_badge(ui: &mut Ui, text: &str, color: Color32, background: Color32
         .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Status, true, text));
 }
 
-/// Input satu baris dengan bingkai inset dan highlight aksen saat fokus.
+/// Input satu baris dengan bingkai inset dan highlight aksen saat hover/fokus.
 pub fn text_field(
     ui: &mut Ui,
     id_salt: &str,
@@ -408,28 +443,49 @@ pub fn text_field(
     hint: &str,
 ) -> Response {
     let id = egui::Id::unique(id_salt);
+    let hover_key = id.with("hover");
+    let prev_hover = ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(hover_key))
+        .unwrap_or(false);
     let focused = ui.memory(|m| m.has_focus(id));
-    ui.add(
+    let hover = animate_bool_ease(
+        ui.ctx(),
+        hover_key,
+        prev_hover && ui.is_enabled(),
+        HOVER_ANIM,
+    );
+    let focus = animate_bool_ease(ui.ctx(), id.with("focus"), focused, STATE_ANIM);
+    let border = mix(
+        mix(BORDER, ACCENT_BORDER, 0.45 * hover),
+        ACCENT_BORDER,
+        focus,
+    );
+    let fill = mix(INPUT, Color32::from_gray(14), 0.5 * hover * (1.0 - focus));
+    let response = ui.add(
         egui::TextEdit::singleline(text)
             .id(id)
             .desired_width(width)
             .hint_text(RichText::new(hint).color(MUTED))
             .frame(
                 Frame::new()
-                    .fill(INPUT)
-                    .stroke(Stroke::new(
-                        1.0,
-                        if focused { ACCENT_BORDER } else { BORDER },
-                    ))
+                    .fill(fill)
+                    .stroke(Stroke::new(1.0, border))
                     .corner_radius(8)
                     .inner_margin(Margin::symmetric(11, 8)),
             ),
-    )
+    );
+    let now_hover = response.enabled() && response.hovered();
+    ui.ctx().data_mut(|d| d.insert_temp(hover_key, now_hover));
+    if now_hover != prev_hover {
+        ui.ctx().request_repaint();
+    }
+    response
 }
 
 const ACTION_HEIGHT: f32 = 34.0;
 
-/// Kedua tombol dikte memakai bingkai egui yang sama di setiap keadaan.
+/// Kedua tombol dikte memakai bingkai egui yang sama dan animasi hover/tekan di setiap keadaan.
 pub fn dictation_button(
     ui: &mut Ui,
     enabled: bool,
@@ -438,25 +494,34 @@ pub fn dictation_button(
     text: &str,
 ) -> Response {
     ui.scope(|ui| {
-        let mut fg = TEXT;
+        let mut fg = if enabled { TEXT } else { MUTED };
         if let Some(fill) = fill {
             fg = if enabled { ON_ACCENT } else { MUTED };
             if enabled {
+                let hover_fill = if fill == ACCENT_HOVER {
+                    mix(ACCENT_HOVER, Color32::WHITE, 0.14)
+                } else {
+                    ACCENT_HOVER
+                };
                 let w = &mut ui.visuals_mut().widgets;
                 for (state, color) in [
                     (&mut w.inactive, fill),
-                    (&mut w.hovered, ACCENT_HOVER),
-                    (&mut w.active, ACCENT),
+                    (&mut w.hovered, hover_fill),
+                    (&mut w.active, ACCENT_ACTIVE),
                 ] {
+                    state.bg_fill = color;
                     state.weak_bg_fill = color;
                     state.bg_stroke.color = color;
                 }
             }
         }
-        ui.add_enabled(
-            enabled,
-            egui::Button::new(RichText::new(text).color(fg)).min_size(vec2(width, ACTION_HEIGHT)),
-        )
+        interactive(ui, |ui| {
+            ui.add_enabled(
+                enabled,
+                egui::Button::new(RichText::new(text).color(fg))
+                    .min_size(vec2(width, ACTION_HEIGHT)),
+            )
+        })
     })
     .inner
 }
@@ -474,10 +539,15 @@ pub fn action_button(
             MUTED
         } else if accent {
             let w = &mut ui.visuals_mut().widgets;
-            w.inactive.bg_fill = ACCENT_TINT;
-            w.hovered.bg_fill = ACCENT_TINT.gamma_multiply(1.6);
-            w.active.bg_fill = ACCENT_TINT.gamma_multiply(2.0);
-            w.inactive.bg_stroke.color = ACCENT_BORDER;
+            for (state, fill, stroke) in [
+                (&mut w.inactive, ACCENT_TINT, ACCENT_BORDER),
+                (&mut w.hovered, ACCENT_TINT.gamma_multiply(1.8), ACCENT),
+                (&mut w.active, ACCENT_TINT.gamma_multiply(2.4), ACCENT_HOVER),
+            ] {
+                state.bg_fill = fill;
+                state.weak_bg_fill = fill;
+                state.bg_stroke.color = stroke;
+            }
             ACCENT_HOVER
         } else {
             TEXT
@@ -559,5 +629,83 @@ mod tests {
         }
         assert_eq!(frame(vec![], false).1, RAISED);
         assert!(!frame(vec![button(true), button(false)], false).2);
+    }
+
+    #[test]
+    fn dictation_button_animates_hover_without_moving_layout() {
+        use egui::epaint::Shape;
+
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let mut time = 0.0;
+        let mut run = |events, fill| {
+            time += 1.0 / 60.0;
+            let mut rect = egui::Rect::NOTHING;
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    rect = dictation_button(ui, true, fill, 120.0, "Mulai dikte").rect;
+                },
+            );
+            let painted_fill = output.shapes.iter().find_map(|s| match &s.shape {
+                Shape::Rect(r) if r.rect.width() >= 100.0 => Some(r.fill),
+                _ => None,
+            });
+            (rect, painted_fill.expect("tombol harus menggambar persegi"))
+        };
+
+        for (fill, idle, hovered) in [(Some(ACCENT), ACCENT, ACCENT_HOVER), (None, RAISED, BORDER)]
+        {
+            ctx.clear_animations();
+            let (rest_rect, rest_fill) = run(vec![], fill);
+            assert_eq!(rest_fill, idle);
+            let pos = rest_rect.center();
+            run(vec![egui::Event::PointerMoved(pos)], fill);
+            let mut fills = Vec::new();
+            for _ in 0..14 {
+                let (r, c) = run(vec![], fill);
+                assert_eq!(r, rest_rect);
+                fills.push(c);
+            }
+            assert!(fills.iter().any(|&c| c != idle && c != hovered));
+            assert_eq!(*fills.last().unwrap(), hovered);
+            run(vec![egui::Event::PointerGone], fill);
+            for _ in 0..14 {
+                run(vec![], fill);
+            }
+        }
+    }
+
+    #[test]
+    fn animate_color_transitions_smoothly() {
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let id = egui::Id::unique("test-color");
+        let mut time = 0.0;
+        let mut sample = |target| {
+            time += 1.0 / 60.0;
+            let mut out = Color32::TRANSPARENT;
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    ..Default::default()
+                },
+                |ui| {
+                    out = animate_color(ui.ctx(), id, target, STATE_ANIM);
+                },
+            );
+            out
+        };
+        assert_eq!(sample(SUCCESS), SUCCESS);
+        let mut steps = Vec::new();
+        for _ in 0..15 {
+            steps.push(sample(ACCENT));
+        }
+        assert!(steps.iter().any(|&c| c != SUCCESS && c != ACCENT));
+        assert_eq!(*steps.last().unwrap(), ACCENT);
     }
 }
