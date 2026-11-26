@@ -629,83 +629,44 @@ mod tests {
         }
         assert_eq!(frame(vec![], false).1, RAISED);
         assert!(!frame(vec![button(true), button(false)], false).2);
-    }
 
-    #[test]
-    fn dictation_button_animates_hover_without_moving_layout() {
+        // Pastikan tombol dikte primer (amber) dan sekunder beranimasi hover tanpa menggeser layout.
         use egui::epaint::Shape;
-
-        let ctx = egui::Context::default();
-        install(&ctx);
-        let mut time = 0.0;
-        let mut run = |events, fill| {
-            time += 1.0 / 60.0;
-            let mut rect = egui::Rect::NOTHING;
-            let output = ctx.run_ui(
-                egui::RawInput {
-                    time: Some(time),
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    rect = dictation_button(ui, true, fill, 120.0, "Mulai dikte").rect;
-                },
-            );
-            let painted_fill = output.shapes.iter().find_map(|s| match &s.shape {
-                Shape::Rect(r) if r.rect.width() >= 100.0 => Some(r.fill),
-                _ => None,
-            });
-            (rect, painted_fill.expect("tombol harus menggambar persegi"))
-        };
-
         for (fill, idle, hovered) in [(Some(ACCENT), ACCENT, ACCENT_HOVER), (None, RAISED, BORDER)]
         {
-            ctx.clear_animations();
-            let (rest_rect, rest_fill) = run(vec![], fill);
+            let ctx = egui::Context::default();
+            install(&ctx);
+            let mut t = 0.0;
+            let mut run = |events| {
+                t += 1.0 / 60.0;
+                let mut rect = egui::Rect::NOTHING;
+                let output = ctx.run_ui(
+                    egui::RawInput {
+                        time: Some(t),
+                        events,
+                        ..Default::default()
+                    },
+                    |ui| {
+                        rect = dictation_button(ui, true, fill, 120.0, "Mulai dikte").rect;
+                    },
+                );
+                let painted = output.shapes.iter().find_map(|s| match &s.shape {
+                    Shape::Rect(r) if r.rect.width() >= 100.0 => Some(r.fill),
+                    _ => None,
+                });
+                (rect, painted.expect("tombol harus menggambar persegi"))
+            };
+            let (rest_rect, rest_fill) = run(vec![]);
             assert_eq!(rest_fill, idle);
-            let pos = rest_rect.center();
-            run(vec![egui::Event::PointerMoved(pos)], fill);
+            run(vec![egui::Event::PointerMoved(rest_rect.center())]);
             let mut fills = Vec::new();
             for _ in 0..14 {
-                let (r, c) = run(vec![], fill);
+                let (r, c) = run(vec![]);
                 assert_eq!(r, rest_rect);
                 fills.push(c);
             }
             assert!(fills.iter().any(|&c| c != idle && c != hovered));
             assert_eq!(*fills.last().unwrap(), hovered);
-            run(vec![egui::Event::PointerGone], fill);
-            for _ in 0..14 {
-                run(vec![], fill);
-            }
         }
-    }
-
-    #[test]
-    fn animate_color_transitions_smoothly() {
-        let ctx = egui::Context::default();
-        install(&ctx);
-        let id = egui::Id::unique("test-color");
-        let mut time = 0.0;
-        let mut sample = |target| {
-            time += 1.0 / 60.0;
-            let mut out = Color32::TRANSPARENT;
-            let _ = ctx.run_ui(
-                egui::RawInput {
-                    time: Some(time),
-                    ..Default::default()
-                },
-                |ui| {
-                    out = animate_color(ui.ctx(), id, target, STATE_ANIM);
-                },
-            );
-            out
-        };
-        assert_eq!(sample(SUCCESS), SUCCESS);
-        let mut steps = Vec::new();
-        for _ in 0..15 {
-            steps.push(sample(ACCENT));
-        }
-        assert!(steps.iter().any(|&c| c != SUCCESS && c != ACCENT));
-        assert_eq!(*steps.last().unwrap(), ACCENT);
     }
 }

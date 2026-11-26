@@ -782,9 +782,32 @@ mod tests {
     }
 
     #[test]
-    fn shutdown_blocks_insertion_before_sending_input() {
+    fn insertion_guards_and_unicode() {
         let result = insert_text(Target { hwnd: 0, pid: 0 }, "uji", &AtomicBool::new(true));
         assert_eq!(result, Inserted::Blocked("Aplikasi ditutup.".into()));
+
+        let a = Target { hwnd: 1, pid: 10 };
+        let b = Target { hwnd: 2, pid: 10 };
+        assert_eq!(may_insert(Some(a), Some(a)), Ok(a));
+        assert_eq!(may_insert(Some(a), Some(b)), Err(Blocked::TargetChanged));
+        assert_eq!(may_insert(Some(a), None), Err(Blocked::TargetChanged));
+        assert_eq!(may_insert(None, Some(a)), Err(Blocked::NoTarget));
+
+        let inputs = unicode_inputs(&['é', '😀']);
+        // é = 1 unit, 😀 = 2 unit; masing-masing keydown + keyup.
+        assert_eq!(inputs.len(), 6);
+        let units: Vec<u16> = inputs
+            .iter()
+            .map(|i| unsafe { i.Anonymous.ki.wScan })
+            .collect();
+        assert_eq!(units, [0xE9, 0xE9, 0xD83D, 0xD83D, 0xDE00, 0xDE00]);
+        assert!(inputs.iter().all(|i| unsafe { i.Anonymous.ki.wVk } == 0));
+        let flags: Vec<u32> = inputs
+            .iter()
+            .map(|i| unsafe { i.Anonymous.ki.dwFlags })
+            .collect();
+        assert_eq!(flags[0], KEYEVENTF_UNICODE);
+        assert_eq!(flags[1], KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
     }
 
     #[test]
@@ -849,34 +872,5 @@ mod tests {
                 total: BATCH_CHARS + 1
             }
         );
-    }
-
-    #[test]
-    fn insertion_requires_same_target() {
-        let a = Target { hwnd: 1, pid: 10 };
-        let b = Target { hwnd: 2, pid: 10 };
-        assert_eq!(may_insert(Some(a), Some(a)), Ok(a));
-        assert_eq!(may_insert(Some(a), Some(b)), Err(Blocked::TargetChanged));
-        assert_eq!(may_insert(Some(a), None), Err(Blocked::TargetChanged));
-        assert_eq!(may_insert(None, Some(a)), Err(Blocked::NoTarget));
-    }
-
-    #[test]
-    fn unicode_inputs_keep_surrogate_pairs() {
-        let inputs = unicode_inputs(&['é', '😀']);
-        // é = 1 unit, 😀 = 2 unit; masing-masing keydown + keyup.
-        assert_eq!(inputs.len(), 6);
-        let units: Vec<u16> = inputs
-            .iter()
-            .map(|i| unsafe { i.Anonymous.ki.wScan })
-            .collect();
-        assert_eq!(units, [0xE9, 0xE9, 0xD83D, 0xD83D, 0xDE00, 0xDE00]);
-        assert!(inputs.iter().all(|i| unsafe { i.Anonymous.ki.wVk } == 0));
-        let flags: Vec<u32> = inputs
-            .iter()
-            .map(|i| unsafe { i.Anonymous.ki.dwFlags })
-            .collect();
-        assert_eq!(flags[0], KEYEVENTF_UNICODE);
-        assert_eq!(flags[1], KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
     }
 }

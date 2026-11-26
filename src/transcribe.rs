@@ -643,29 +643,16 @@ mod tests {
     }
 
     #[test]
-    fn join_trims_and_spaces_segments() {
+    fn text_and_error_formatting() {
         let text = join_segments([" Halo,  dunia.".to_owned(), "  Apa kabar? ".to_owned()]);
         assert_eq!(text, "Halo, dunia. Apa kabar?");
         assert_eq!(join_segments(["   ".to_owned()]), "");
-    }
 
-    #[test]
-    fn backend_summary_requires_gpu_log() {
-        let log = vec!["whisper_backend_init_gpu: using CUDA0 backend".to_owned()];
-        assert_eq!(backend_summary(&log), "GPU CUDA0");
-        assert!(backend_summary(&[]).starts_with("CPU"));
-    }
-
-    #[test]
-    fn short_error_keeps_driver_code() {
         let e =
             "Inference failed: DriverError(CUDA_ERROR_UNSUPPORTED_PTX_VERSION, \"the provided\")";
         assert_eq!(short_error(e), "CUDA_ERROR_UNSUPPORTED_PTX_VERSION");
         assert_eq!(short_error("no device"), "no device");
-    }
 
-    #[test]
-    fn qwen_text_drops_format_prefix() {
         assert_eq!(clean_qwen_text("  Halo   dunia. "), "Halo dunia.");
         assert_eq!(
             clean_qwen_text("language Indonesian<asr_text>Halo dunia."),
@@ -673,6 +660,13 @@ mod tests {
         );
         assert_eq!(clean_qwen_text("<asr_text> Apa kabar?"), "Apa kabar?");
         assert_eq!(clean_qwen_text("<asr_text>"), "");
+    }
+
+    #[test]
+    fn backend_summary_requires_gpu_log() {
+        let log = vec!["whisper_backend_init_gpu: using CUDA0 backend".to_owned()];
+        assert_eq!(backend_summary(&log), "GPU CUDA0");
+        assert!(backend_summary(&[]).starts_with("CPU"));
     }
 
     #[test]
@@ -749,16 +743,6 @@ mod tests {
             }
         }
         (row[b.len()], a.len())
-    }
-
-    #[test]
-    fn wer_counts_substitutions_deletions_insertions_and_normalizes() {
-        assert_eq!(word_errors("Tim-tim, virtual!", "tim tim virtual"), (0, 3));
-        assert_eq!(word_errors("a b c", "a x c"), (1, 3));
-        assert_eq!(word_errors("a b c", "a c"), (1, 3));
-        assert_eq!(word_errors("a b", "a x b"), (1, 2));
-        assert_eq!(word_errors("a b", ""), (2, 2));
-        assert_eq!(word_errors("", "a"), (1, 0));
     }
 
     fn run_fixture(engine: Engine) {

@@ -709,10 +709,7 @@ mod tests {
 
         let (out, ..) = run(&[0u8, 128u8], 1, 8);
         assert!((out[0] + 1.0).abs() < 1e-6 && out[1].abs() < 1e-6);
-    }
 
-    #[test]
-    fn overflow_is_reported() {
         let (out, overflow, _) = run(&[0.1f32; 10], 1, 4);
         assert_eq!(out.len(), 4);
         assert!(overflow);
