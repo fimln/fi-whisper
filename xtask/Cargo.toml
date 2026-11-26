@@ -1,0 +1,18 @@
+[workspace]
+
+[package]
+name = "xtask"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.95"
+license = "MIT"
+publish = false
+
+[dependencies]
+image = { version = "=0.25.10", default-features = false, features = ["png"] }
+reqwest = { version = "=0.12.24", default-features = false, features = ["blocking", "json", "rustls-tls-native-roots"] }
+resvg = { version = "=0.50.0", default-features = false, features = ["text"] }
+ring = "=0.17.14"
+serde = { version = "=1.0.229", features = ["derive"] }
+serde_json = "=1.0.154"
+zip = { version = "=7.4.0", default-features = false, features = ["deflate"] }

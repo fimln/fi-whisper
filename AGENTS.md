@@ -20,7 +20,8 @@ Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR s
 - `src/config.rs`: `Engine`, `Language`, `GoogleConfig`, `DeepSeekConfig`, config JSON atomik di `%LOCALAPPDATA%\fi-whisper\config.json`. Field lama `google.enabled` diabaikan.
 - `src/theme.rs`: palet, font, logo, ikon, helper tampilan.
 - `vendor/qwen3-asr`: salinan crate qwen3-asr 0.2.2 dengan patch (layout `*-hf`, pembatalan). Ubah seperlunya, catat di `docs/CREDITS.md`.
-- `assets/`: logo (dibuat `scripts/make-logo.py`), ikon Octicons, screenshot README.
+- `xtask/`: otomasi Rust (`setup-cuda`, `build`/`clippy`/`test`, `package`, `test-model`, `make-logo`) tanpa menambah dependensi ke binary utama `fi-whisper`.
+- `assets/`: logo (dibuat `cargo xtask make-logo`), ikon Octicons, screenshot README.
 
 ## Model
 - Disimpan di `models\<folder>\`, tidak di-commit. Whisper `whisper-large-v3-turbo\ggml-large-v3-turbo.bin`, VAD `silero-vad-v6.2.0\ggml-silero-v6.2.0.bin`, Qwen `Qwen3-ASR-0.6B-hf\` dan `Qwen3-ASR-1.7B-hf\`.
@@ -46,16 +47,18 @@ Aplikasi dikte Windows (Rust + egui 0.37) dengan mesin lokal Whisper/Qwen3-ASR s
 
 ## Perintah
 ```powershell
-./scripts/setup-cuda.ps1                                   # CUDA redistributable ke .local/, sekali saja
-./scripts/build-cuda.ps1 build --locked --release          # selalu memakai fitur cuda,qwen-cuda
-./scripts/build-cuda.ps1 clippy --locked --all-targets '--' -D warnings
-./scripts/build-cuda.ps1 test --locked --release
-./scripts/build-cuda.ps1 test --locked --release recording_completes_while_noise_is_playing '--' --ignored
-./scripts/build-cuda.ps1 test --locked --release '--' --ignored fixture --nocapture --test-threads=1
+cargo xtask setup-cuda                                   # CUDA redistributable ke .local/, sekali saja
+cargo xtask build --locked --release                     # selalu memakai fitur cuda,qwen-cuda
+cargo xtask clippy --locked --all-targets -- -D warnings
+cargo xtask test --locked --release
+cargo xtask test --locked --release recording_completes_while_noise_is_playing -- --ignored
+cargo xtask test --locked --release -- --ignored fixture --nocapture --test-threads=1
 # Opt-in tes cloud berbayar dengan ADC; jalankan terpisah dan serial:
 $env:FI_WHISPER_TEST_PROJECT = 'PROJECT_ID'
-./scripts/build-cuda.ps1 test --locked --release cloud::tests::cloud_ '--' --ignored --nocapture --test-threads=1
-./scripts/package.ps1                                      # dist/fi-whisper, tutup aplikasi dulu
+cargo xtask test --locked --release cloud::tests::cloud_ -- --ignored --nocapture --test-threads=1
+cargo xtask package                                      # dist/fi-whisper, tutup aplikasi dulu
+cargo xtask make-logo                                    # render ulang assets/logo.* dan ikon Octicons
+cargo xtask test-model --self-test                       # uji metrik WER / benchmark whisper-cli
 ```
 Peringatan `vswhere.exe` dan LNK4098 (LIBCMT) sudah ada sejak awal dan tidak perlu diperbaiki.
 

@@ -160,7 +160,7 @@ pub const WARN: Color32 = ACCENT_HOVER;
 /// Warna pil tautan beranda, dibedakan dari amber (GitHub) dan hijau (status).
 pub const LINK_HOME: Color32 = Color32::from_rgb(0x38, 0xBD, 0xF8);
 
-/// Logo 128×128 RGBA (dibuat oleh scripts/make-logo.py).
+/// Logo 128×128 RGBA (dibuat oleh `cargo xtask make-logo`).
 pub const LOGO_SIZE: usize = 128;
 pub const LOGO_RGBA: &[u8] = include_bytes!("../assets/logo-128.rgba");
 

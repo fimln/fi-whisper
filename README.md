@@ -59,10 +59,10 @@ Building it for yourself? Bring it on! You need Rust (MSVC 1.95+), Visual Studio
 
 ```powershell
 cargo build --locked --release                         # CPU
-./scripts/setup-cuda.ps1                               # once: ~460 MB of CUDA 13.2.2 components in .local/
-./scripts/build-cuda.ps1 build --locked --release      # Whisper + Qwen on GPU
-./scripts/build-cuda.ps1 test --release '--' --ignored fixture --nocapture
-./scripts/package.ps1                                  # dist/fi-whisper: exe, CUDA DLLs, logo, licenses
+cargo xtask setup-cuda                                 # once: ~460 MB of CUDA 13.2.2 components in .local/
+cargo xtask build --locked --release                   # Whisper + Qwen on GPU
+cargo xtask test --release -- --ignored fixture --nocapture
+cargo xtask package                                    # dist/fi-whisper: exe, CUDA DLLs, logo, licenses
 ```
 
 ### Cloud setup

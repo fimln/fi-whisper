@@ -1,6 +1,6 @@
 # Uji model lokal sebelum integrasi backend
 
-18 Oktober 2026. Pengujian terpisah dari UI melalui [scripts/test-model.ps1](../scripts/test-model.ps1). Tidak mengubah UI atau menghubungkan backend produk.
+18 Oktober 2026. Pengujian terpisah dari UI (kini dimigrasi ke [xtask/src/test_model.rs](../xtask/src/test_model.rs)). Tidak mengubah UI atau menghubungkan backend produk.
 
 ## Hasil
 
@@ -49,12 +49,12 @@ Audio: tiga WAV pertama Indonesia dari [Google FLEURS](https://huggingface.co/da
 
 ## Reproduksi dan bukti tersimpan
 
-Jalankan dari root proyek dengan PowerShell 7:
+Jalankan dari root proyek dengan `cargo xtask`:
 
 ```powershell
-.\scripts\test-model.ps1 -SelfTest
-.\scripts\test-model.ps1
-.\scripts\test-model.ps1 -Cpu
+cargo xtask test-model --self-test
+cargo xtask test-model
+cargo xtask test-model --cpu
 ```
 
 CUDA adalah default dan tidak fallback ke CPU diam-diam. Skrip memeriksa exit code, log pemilihan backend, aktivitas GPU, hasil nonkosong, checksum runtime/model/fixture, serta timeout 180 detik per proses. Model tidak diunduh ulang oleh skrip. Runtime dan fixture yang hilang diunduh melalui HTTPS ke `.part`, diperiksa, lalu di-rename. Setelah cache lengkap, inference dan checks tidak membutuhkan jaringan.
@@ -71,7 +71,7 @@ Belum diuji: audio silence/noise-only, capture mikrofon, resampling/tail, rekama
 
 ## Uji tiga mesin (aplikasi, GPU)
 
-`./scripts/build-cuda.ps1 test --locked --release '--' --ignored fixture --nocapture --test-threads=1` di RTX 5060 Laptop (driver 617.42, CUDA 13.4), tiga klip FLEURS yang sama, bahasa `id`. Waktu ASR per klip setelah VAD; load termasuk pemanasan GPU.
+`cargo xtask test --locked --release -- --ignored fixture --nocapture --test-threads=1` di RTX 5060 Laptop (driver 617.42, CUDA 13.4), tiga klip FLEURS yang sama, bahasa `id`. Waktu ASR per klip setelah VAD; load termasuk pemanasan GPU.
 
 | Mesin | Load | ASR per klip | Catatan hasil |
 | --- | --- | --- | --- |

@@ -1,6 +1,6 @@
 # Atribusi
 
-- Token warna, gaya kartu, spacing, dan pengaturan font diadaptasi dari `fi-shortener/desktop/src/theme.rs`, dibaca sebagai referensi lokal. Logo fi-whisper mengikuti bentuk logo fi-shortener dengan palet amber, dibuat oleh `scripts/make-logo.py`.
+- Token warna, gaya kartu, spacing, dan pengaturan font diadaptasi dari `fi-shortener/desktop/src/theme.rs`, dibaca sebagai referensi lokal. Logo fi-whisper mengikuti bentuk logo fi-shortener dengan palet amber, dibuat oleh `cargo xtask make-logo`.
 - Ikon GitHub (`mark-github-24`), beranda (`home-fill-24`), serta `dash-24` dan `x-24`: [Primer Octicons](https://github.com/primer/octicons), GitHub Inc., MIT ([lisensi](../assets/icons/OCTICONS-LICENSE.txt)). Logo GitHub hanya dipakai sebagai tautan ke repo.
 - Inter Regular, Medium, SemiBold: Rasmus Andersson / Inter contributors, SIL Open Font License 1.1. Lisensi lengkap: [Inter-LICENSE.txt](../fonts/Inter-LICENSE.txt).
 - JetBrains Mono Regular: JetBrains, SIL Open Font License 1.1. Lisensi lengkap: [JetBrainsMono-OFL.txt](../fonts/JetBrainsMono-OFL.txt).
