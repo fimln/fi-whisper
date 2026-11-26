@@ -64,6 +64,7 @@ Peringatan `vswhere.exe` dan LNK4098 (LIBCMT) sudah ada sejak awal dan tidak per
 
 ## Verifikasi
 - Setelah mengubah kode: `cargo fmt`, clippy, unit test. Kalau menyentuh worker atau model, jalankan juga uji fixture.
+- Setiap build rilis non-test (setelah perubahan kode aplikasi selesai diverifikasi), perbarui juga `dist/fi-whisper` dengan `cargo xtask package` (tutup aplikasi terlebih dahulu, pastikan tanpa fitur `inspection`) agar shortcut Start Menu dan instalasi lokal memakai binary terbaru.
 - Tes unit fi-focus memeriksa level dan karakter frekuensi tiap jenis noise, fade 20 ms, urutan pemutaran, pelepasan output saat jeda, dan galat yang datang dari stream lama. Tes rekam sambil memutar noise memakai mikrofon dan perangkat output Windows.
 - Perubahan transport/audio cloud perlu tes fixture cloud, hening, pembatalan, batas penggunaan, dan streaming 120 detik. Tes ini memakai kuota Google dan diabaikan secara default; jangan memasukkannya ke tes lokal/CI tanpa opt-in. Jangan simpan transkrip ke disk; laporkan metrik/status saja.
 - Klaim GPU butuh bukti dari log backend (`GPU CUDA0`) atau nvidia-smi. Flag konfigurasi saja tidak cukup.

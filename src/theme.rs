@@ -65,6 +65,12 @@ pub fn interactive(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Respon
     );
     let response = ui
         .scope(|ui| {
+            // Di dalam popup/menu (ScrollArea dropdown), expansion memotong border 1 px dan menggeser tepi item.
+            let in_popup = ui
+                .stack()
+                .iter()
+                .any(|s| matches!(s.kind(), Some(egui::UiKind::Popup | egui::UiKind::Menu)));
+            let expansion = if in_popup { 0.0 } else { hover - press };
             let w = &mut ui.visuals_mut().widgets;
             let rest = w.inactive;
             let fill = mix(
@@ -86,7 +92,7 @@ pub fn interactive(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> Response) -> Respon
                 state.bg_fill = fill;
                 state.weak_bg_fill = weak;
                 state.bg_stroke.color = border;
-                state.expansion = hover - press;
+                state.expansion = expansion;
             }
             add(ui)
         })
@@ -125,6 +131,11 @@ pub fn combo(
                     );
             })
             .truncate()
+            .popup_style(egui::style::StyleModifier::new(|style| {
+                // Pindahkan 1 pt margin ke dalam ScrollArea agar border item tidak terpotong batas klip.
+                style.spacing.menu_margin = Margin::same(5);
+                style.spacing.scroll.content_margin = Margin::same(1);
+            }))
             .show_ui(ui, |ui| {
                 ui.set_style(style);
                 add(ui);
@@ -667,6 +678,104 @@ mod tests {
             }
             assert!(fills.iter().any(|&c| c != idle && c != hovered));
             assert_eq!(*fills.last().unwrap(), hovered);
+        }
+    }
+
+    #[test]
+    fn combo_item_hover_border_stays_inside_clip_rect_and_aligned() {
+        use egui::epaint::Shape;
+
+        let ctx = egui::Context::default();
+        install(&ctx);
+        let icons = Icons::load(&ctx);
+        let mut selected = 0usize;
+        let labels = ["White noise", "Pink noise", "Brown noise"];
+        let mut time = 0.0;
+
+        let mut run = |events: Vec<egui::Event>| {
+            time += 1.0 / 60.0;
+            let mut combo_rect = egui::Rect::NOTHING;
+            let mut item_rects = Vec::new();
+            let output = ctx.run_ui(
+                egui::RawInput {
+                    time: Some(time),
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    combo_rect = combo(
+                        ui,
+                        egui::ComboBox::from_id_salt("test-combo")
+                            .width(180.0)
+                            .selected_text(labels[selected]),
+                        &icons.chevron,
+                        |ui| {
+                            for (i, label) in labels.iter().enumerate() {
+                                let r = interactive(ui, |ui| {
+                                    ui.selectable_value(&mut selected, i, *label)
+                                });
+                                item_rects.push(r.rect);
+                            }
+                        },
+                    )
+                    .rect;
+                },
+            );
+            (combo_rect, item_rects, output.shapes)
+        };
+
+        let (combo_rect, _, _) = run(vec![]);
+        let click = |pos| {
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::default(),
+                },
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::default(),
+                },
+            ]
+        };
+        run(click(combo_rect.center()));
+        let (_, item_rects, _) = run(vec![]);
+        assert_eq!(item_rects.len(), labels.len());
+
+        for &idx in &[0usize, 1, 2] {
+            let target = item_rects[idx];
+            run(vec![egui::Event::PointerMoved(target.center())]);
+            let mut last_shapes = Vec::new();
+            for _ in 0..14 {
+                last_shapes = run(vec![]).2;
+            }
+            let hovered_shape = last_shapes
+                .iter()
+                .find_map(|cs| match &cs.shape {
+                    Shape::Rect(r)
+                        if r.stroke.color == ACCENT_BORDER && r.rect.intersects(target) =>
+                    {
+                        Some((cs.clip_rect, r.rect))
+                    }
+                    _ => None,
+                })
+                .expect("item dropdown yang di-hover harus menggambar border ACCENT_BORDER");
+            let (clip, painted) = hovered_shape;
+            assert!(
+                clip.contains_rect(painted),
+                "item {idx}: border {painted:?} terpotong clip_rect {clip:?}"
+            );
+            assert!(
+                (painted.left() - target.left()).abs() <= 0.01
+                    && (painted.right() - target.right()).abs() <= 0.01
+                    && (painted.top() - target.top()).abs() <= 0.01
+                    && (painted.bottom() - target.bottom()).abs() <= 0.01,
+                "item {idx}: border {painted:?} harus sejajar dengan rect item {target:?}"
+            );
         }
     }
 }
